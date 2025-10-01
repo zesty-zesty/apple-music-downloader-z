@@ -37,37 +37,47 @@ import (
 )
 
 var (
-	forbiddenNames = regexp.MustCompile(`[/\\<>:"|?*]`)
-	dl_atmos       bool
-	dl_aac         bool
-	dl_select      bool
-	dl_song        bool
-	artist_select  bool
-	debug_mode     bool
-	alac_max       *int
-	atmos_max      *int
-	mv_max         *int
-	mv_audio_type  *string
-	aac_type       *string
-	codec_priority *[]string
-	Config         structs.ConfigSet
-	counter        structs.Counter
-	okDict         = make(map[string][]int)
+    forbiddenNames = regexp.MustCompile(`[/\\<>:"|?*]`)
+    dl_atmos       bool
+    dl_aac         bool
+    dl_select      bool
+    dl_song        bool
+    artist_select  bool
+    debug_mode     bool
+    alac_max       *int
+    atmos_max      *int
+    mv_max         *int
+    mv_audio_type  *string
+    aac_type       *string
+    codec_priority *[]string
+    Config         structs.ConfigSet
+    counter        structs.Counter
+    okDict         = make(map[string][]int)
+    OutputFolder   string
 )
 
 func loadConfig() error {
-	data, err := os.ReadFile("config.yaml")
-	if err != nil {
-		return err
-	}
-	err = yaml.Unmarshal(data, &Config)
-	if err != nil {
-		return err
-	}
-	if len(Config.Storefront) != 2 {
-		Config.Storefront = "us"
-	}
-	return nil
+    data, err := os.ReadFile("config.yaml")
+    if err != nil {
+        return err
+    }
+    err = yaml.Unmarshal(data, &Config)
+    if err != nil {
+        return err
+    }
+    if len(Config.Storefront) != 2 {
+        Config.Storefront = "us"
+    }
+    // 读取 output-folder（不修改外部 ConfigSet 结构）
+    var cfgOut struct {
+        OutputFolder string `yaml:"output-folder"`
+    }
+    _ = yaml.Unmarshal(data, &cfgOut)
+    OutputFolder = strings.TrimSpace(cfgOut.OutputFolder)
+    if OutputFolder == "" {
+        OutputFolder = "output"
+    }
+    return nil
 }
 
 func LimitString(s string) string {
@@ -1019,10 +1029,10 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		singerFoldername = strings.TrimSpace(singerFoldername)
 		fmt.Println(singerFoldername)
 	}
-    // 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder := filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-    os.MkdirAll(singerFolder, os.ModePerm)
-    station.SaveDir = singerFolder
+	// 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder := filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	os.MkdirAll(singerFolder, os.ModePerm)
+	station.SaveDir = singerFolder
 
 	playlistFolder := strings.NewReplacer(
 		"{ArtistName}", "Apple Music Station",
@@ -1335,10 +1345,10 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 			}
 		}
 	}
-    // 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder = filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-    os.MkdirAll(singerFolder, os.ModePerm)
-    album.SaveDir = singerFolder
+	// 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	os.MkdirAll(singerFolder, os.ModePerm)
+	album.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
@@ -1648,10 +1658,10 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 			}
 		}
 	}
-    // 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder = filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-    os.MkdirAll(singerFolder, os.ModePerm)
-    playlist.SaveDir = singerFolder
+	// 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	os.MkdirAll(singerFolder, os.ModePerm)
+	playlist.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
@@ -1984,9 +1994,9 @@ func main() {
 					"{ArtistId}", "",
 				).Replace(Config.ArtistFolderFormat)
 				if mvSaveDir != "" {
-					mvSaveDir = filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(mvSaveDir, "_"))
+                    mvSaveDir = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(mvSaveDir, "_"))
 				} else {
-					mvSaveDir = Config.AlacSaveFolder
+                    mvSaveDir = OutputFolder
 				}
 				storefront, albumId = checkUrlMv(urlRaw)
 				err := mvDownloader(albumId, mvSaveDir, token, storefront, Config.MediaUserToken, nil)
