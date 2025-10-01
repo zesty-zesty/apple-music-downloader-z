@@ -1019,15 +1019,10 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		singerFoldername = strings.TrimSpace(singerFoldername)
 		fmt.Println(singerFoldername)
 	}
-	singerFolder := filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	if dl_atmos {
-		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	if dl_aac {
-		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	os.MkdirAll(singerFolder, os.ModePerm)
-	station.SaveDir = singerFolder
+    // 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder := filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+    os.MkdirAll(singerFolder, os.ModePerm)
+    station.SaveDir = singerFolder
 
 	playlistFolder := strings.NewReplacer(
 		"{ArtistName}", "Apple Music Station",
@@ -1340,16 +1335,10 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 			}
 		}
 	}
-	// Decide save folder based on resolved codec flags (priority-driven)
-	if dl_atmos {
-		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	} else if dl_aac {
-		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	} else {
-		singerFolder = filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	os.MkdirAll(singerFolder, os.ModePerm)
-	album.SaveDir = singerFolder
+    // 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder = filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+    os.MkdirAll(singerFolder, os.ModePerm)
+    album.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
@@ -1659,16 +1648,10 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 			}
 		}
 	}
-	// Decide save folder based on resolved codec flags (priority-driven)
-	if dl_atmos {
-		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	} else if dl_aac {
-		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	} else {
-		singerFolder = filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	os.MkdirAll(singerFolder, os.ModePerm)
-	playlist.SaveDir = singerFolder
+    // 使用统一的输出根目录，不再根据 codec 分类保存目录
+    singerFolder = filepath.Join("output", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+    os.MkdirAll(singerFolder, os.ModePerm)
+    playlist.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
