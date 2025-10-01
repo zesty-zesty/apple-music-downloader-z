@@ -49,6 +49,7 @@ var (
 	mv_max         *int
 	mv_audio_type  *string
 	aac_type       *string
+	codec_priority *[]string
 	Config         structs.ConfigSet
 	counter        structs.Counter
 	okDict         = make(map[string][]int)
@@ -818,7 +819,7 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		} else if needDlAacLc {
 			Quality = "256Kbps"
 		} else {
-			_, Quality, err = extractMedia(track.M3u8, true)
+			_, Quality, _, err = extractMedia(track.M3u8, true)
 			if err != nil {
 				fmt.Println("Failed to extract quality from manifest.\n", err)
 				counter.Error++
@@ -930,7 +931,7 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 			return
 		}
 	} else {
-		trackM3u8Url, _, err := extractMedia(track.M3u8, false)
+		trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
 		if err != nil {
 			fmt.Println("\u26A0 Failed to extract info from manifest:", err)
 			counter.Unavailable++
@@ -996,6 +997,7 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 	meta := station.Resp
 
 	var Codec string
+	// 根据标志设置编码类型
 	if dl_atmos {
 		Codec = "ATMOS"
 	} else if dl_aac {
@@ -1212,7 +1214,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 				}
 			}
 
-			_, _, err = extractMedia(m3u8Url, true)
+			_, _, _, err = extractMedia(m3u8Url, true)
 			if err != nil {
 				fmt.Printf("Failed to extract quality info for track %d: %v\n", trackNum, err)
 				continue
@@ -1250,15 +1252,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		singerFoldername = strings.TrimSpace(singerFoldername)
 		fmt.Println(singerFoldername)
 	}
-	singerFolder := filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	if dl_atmos {
-		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	if dl_aac {
-		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	os.MkdirAll(singerFolder, os.ModePerm)
-	album.SaveDir = singerFolder
+	var singerFolder string
 	var Quality string
 	if strings.Contains(Config.AlbumFolderFormat, "Quality") {
 		if dl_atmos {
@@ -1288,14 +1282,74 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 							manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls = EnhancedHls_m3u8
 						}
 					}
-					_, Quality, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
+					var codecs string
+					_, Quality, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
 					if err != nil {
 						fmt.Println("Failed to extract quality from manifest.\n", err)
+					}
+					if codecs == "ec-3" || codecs == "ac-3" {
+						dl_atmos = true
+						dl_aac = false
+					} else if codecs == "mp4a.40.2" {
+						dl_atmos = false
+						dl_aac = true
+					} else {
+						dl_atmos = false
+						dl_aac = false
 					}
 				}
 			}
 		}
 	}
+	// Ensure codec-priority routing applies even without Quality placeholder
+	if !dl_atmos && !dl_aac {
+		manifest1, err := ampapi.GetSongResp(storefront, meta.Data[0].Relationships.Tracks.Data[0].ID, album.Language, token)
+		if err == nil {
+			if manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls == "" {
+				// fallback to AAC if no EnhancedHls
+				dl_atmos = false
+				dl_aac = true
+			} else {
+				needCheck := false
+				if Config.GetM3u8Mode == "all" {
+					needCheck = true
+				} else if Config.GetM3u8Mode == "hires" && contains(meta.Data[0].Relationships.Tracks.Data[0].Attributes.AudioTraits, "hi-res-lossless") {
+					needCheck = true
+				}
+				var EnhancedHls_m3u8 string
+				if needCheck {
+					EnhancedHls_m3u8, _ = checkM3u8(meta.Data[0].Relationships.Tracks.Data[0].ID, "album")
+					if strings.HasSuffix(EnhancedHls_m3u8, ".m3u8") {
+						manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls = EnhancedHls_m3u8
+					}
+				}
+				var codecs string
+				_, _, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
+				if err == nil {
+					if codecs == "ec-3" || codecs == "ac-3" {
+						dl_atmos = true
+						dl_aac = false
+					} else if codecs == "mp4a.40.2" {
+						dl_atmos = false
+						dl_aac = true
+					} else {
+						dl_atmos = false
+						dl_aac = false
+					}
+				}
+			}
+		}
+	}
+	// Decide save folder based on resolved codec flags (priority-driven)
+	if dl_atmos {
+		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	} else if dl_aac {
+		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	} else {
+		singerFolder = filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	}
+	os.MkdirAll(singerFolder, os.ModePerm)
+	album.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
@@ -1485,7 +1539,7 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 				}
 			}
 
-			_, _, err = extractMedia(m3u8Url, true)
+			_, _, _, err = extractMedia(m3u8Url, true)
 			if err != nil {
 				fmt.Printf("Failed to extract quality info for track %d: %v\n", trackNum, err)
 				continue
@@ -1515,15 +1569,7 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		singerFoldername = strings.TrimSpace(singerFoldername)
 		fmt.Println(singerFoldername)
 	}
-	singerFolder := filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	if dl_atmos {
-		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	if dl_aac {
-		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
-	}
-	os.MkdirAll(singerFolder, os.ModePerm)
-	playlist.SaveDir = singerFolder
+	var singerFolder string
 
 	var Quality string
 	if strings.Contains(Config.AlbumFolderFormat, "Quality") {
@@ -1554,14 +1600,75 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 							manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls = EnhancedHls_m3u8
 						}
 					}
-					_, Quality, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
+					var codecs string
+					_, Quality, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
 					if err != nil {
 						fmt.Println("Failed to extract quality from manifest.\n", err)
+					}
+					// Resolve flags from selected codec (priority-driven)
+					if codecs == "ec-3" || codecs == "ac-3" {
+						dl_atmos = true
+						dl_aac = false
+					} else if codecs == "mp4a.40.2" {
+						dl_atmos = false
+						dl_aac = true
+					} else {
+						dl_atmos = false
+						dl_aac = false
 					}
 				}
 			}
 		}
 	}
+	// Ensure codec-priority routing applies even without Quality placeholder
+	if !dl_atmos && !dl_aac {
+		manifest1, err := ampapi.GetSongResp(storefront, meta.Data[0].Relationships.Tracks.Data[0].ID, playlist.Language, token)
+		if err == nil {
+			if manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls == "" {
+				// fallback to AAC if no EnhancedHls
+				dl_atmos = false
+				dl_aac = true
+			} else {
+				needCheck := false
+				if Config.GetM3u8Mode == "all" {
+					needCheck = true
+				} else if Config.GetM3u8Mode == "hires" && contains(meta.Data[0].Relationships.Tracks.Data[0].Attributes.AudioTraits, "hi-res-lossless") {
+					needCheck = true
+				}
+				var EnhancedHls_m3u8 string
+				if needCheck {
+					EnhancedHls_m3u8, _ = checkM3u8(meta.Data[0].Relationships.Tracks.Data[0].ID, "album")
+					if strings.HasSuffix(EnhancedHls_m3u8, ".m3u8") {
+						manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls = EnhancedHls_m3u8
+					}
+				}
+				var codecs string
+				_, _, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
+				if err == nil {
+					if codecs == "ec-3" || codecs == "ac-3" {
+						dl_atmos = true
+						dl_aac = false
+					} else if codecs == "mp4a.40.2" {
+						dl_atmos = false
+						dl_aac = true
+					} else {
+						dl_atmos = false
+						dl_aac = false
+					}
+				}
+			}
+		}
+	}
+	// Decide save folder based on resolved codec flags (priority-driven)
+	if dl_atmos {
+		singerFolder = filepath.Join(Config.AtmosSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	} else if dl_aac {
+		singerFolder = filepath.Join(Config.AacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	} else {
+		singerFolder = filepath.Join(Config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	}
+	os.MkdirAll(singerFolder, os.ModePerm)
+	playlist.SaveDir = singerFolder
 	stringsToJoin := []string{}
 	if meta.Data[0].Attributes.IsAppleDigitalMaster || meta.Data[0].Attributes.IsMasteredForItunes {
 		if Config.AppleMasterChoice != "" {
@@ -1801,6 +1908,7 @@ func main() {
 	aac_type = pflag.String("aac-type", Config.AacType, "Select AAC type, aac aac-binaural aac-downmix")
 	mv_audio_type = pflag.String("mv-audio-type", Config.MVAudioType, "Select MV audio type, atmos ac3 aac")
 	mv_max = pflag.Int("mv-max", Config.MVMax, "Specify the max quality for download MV")
+	codec_priority = pflag.StringSlice("codec-priority", Config.CodecPriority, "Specify the codec priority for download song")
 
 	pflag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [url1 url2 ...]\n", "[main | main.exe | go run main.go]")
@@ -1815,6 +1923,7 @@ func main() {
 	Config.AacType = *aac_type
 	Config.MVAudioType = *mv_audio_type
 	Config.MVMax = *mv_max
+	Config.CodecPriority = *codec_priority
 
 	args := pflag.Args()
 
@@ -2219,27 +2328,27 @@ func formatAvailability(available bool, quality string) string {
 	return quality
 }
 
-func extractMedia(b string, more_mode bool) (string, string, error) {
+func extractMedia(b string, more_mode bool) (string, string, string, error) {
 	masterUrl, err := url.Parse(b)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	resp, err := http.Get(b)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", errors.New(resp.Status)
+		return "", "", "", errors.New(resp.Status)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	masterString := string(body)
 	from, listType, err := m3u8.DecodeFrom(strings.NewReader(masterString), true)
 	if err != nil || listType != m3u8.MASTER {
-		return "", "", errors.New("m3u8 not of master type")
+		return "", "", "", errors.New("m3u8 not of master type")
 	}
 	master := from.(*m3u8.MasterPlaylist)
 	var streamUrl *url.URL
@@ -2329,97 +2438,46 @@ func extractMedia(b string, more_mode bool) (string, string, error) {
 		fmt.Printf("Dolby Audio     : %s\n", formatAvailability(hasDolbyAudio, dolbyAudioQuality))
 		fmt.Println("------------------------")
 
-		return "", "", nil
+		return "", "", "", nil
 	}
 	var Quality string
-	for _, variant := range master.Variants {
-		if dl_atmos {
-			if variant.Codecs == "ec-3" && strings.Contains(variant.Audio, "atmos") {
-				if debug_mode && !more_mode {
-					fmt.Printf("Debug: Found Dolby Atmos variant - %s (Bitrate: %d Kbps)\n",
-						variant.Audio, variant.Bandwidth/1000)
-				}
-				split := strings.Split(variant.Audio, "-")
-				length := len(split)
-				length_int, err := strconv.Atoi(split[length-1])
-				if err != nil {
-					return "", "", err
-				}
-				if length_int <= Config.AtmosMax {
-					if !debug_mode && !more_mode {
-						fmt.Printf("%s\n", variant.Audio)
-					}
-					streamUrlTemp, err := masterUrl.Parse(variant.URI)
-					if err != nil {
-						return "", "", err
-					}
-					streamUrl = streamUrlTemp
-					Quality = fmt.Sprintf("%s Kbps", split[len(split)-1])
-					break
-				}
-			} else if variant.Codecs == "ac-3" { // Add Dolby Audio support
-				if debug_mode && !more_mode {
-					fmt.Printf("Debug: Found Dolby Audio variant - %s (Bitrate: %d Kbps)\n",
-						variant.Audio, variant.Bandwidth/1000)
-				}
-				streamUrlTemp, err := masterUrl.Parse(variant.URI)
-				if err != nil {
-					return "", "", err
-				}
-				streamUrl = streamUrlTemp
-				split := strings.Split(variant.Audio, "-")
-				Quality = fmt.Sprintf("%s Kbps", split[len(split)-1])
-				break
-			}
-		} else if dl_aac {
-			if variant.Codecs == "mp4a.40.2" {
-				if debug_mode && !more_mode {
-					fmt.Printf("Debug: Found AAC variant - %s (Bitrate: %d)\n", variant.Audio, variant.Bandwidth)
-				}
-				aacregex := regexp.MustCompile(`audio-stereo-\d+`)
-				replaced := aacregex.ReplaceAllString(variant.Audio, "aac")
-				if replaced == Config.AacType {
-					if !debug_mode && !more_mode {
-						fmt.Printf("%s\n", variant.Audio)
-					}
-					streamUrlTemp, err := masterUrl.Parse(variant.URI)
-					if err != nil {
-						panic(err)
-					}
-					streamUrl = streamUrlTemp
-					split := strings.Split(variant.Audio, "-")
-					Quality = fmt.Sprintf("%s Kbps", split[2])
-					break
-				}
-			}
+	codecVariants := make(map[string][]*m3u8.Variant)
+	for _, v := range master.Variants {
+		codecVariants[v.Codecs] = append(codecVariants[v.Codecs], v)
+	}
+
+	var variant *m3u8.Variant
+	variant = codecAlternative(codecVariants, Config.CodecPriority)
+	if variant != nil {
+		// 根据选择的编码设置正确的dl_atmos和dl_aac标志
+		if variant.Codecs == "ec-3" && strings.Contains(variant.Audio, "atmos") {
+			dl_atmos = true
+			dl_aac = false
+			fmt.Println("DEBUG: Selected ec-3 codec with atmos, setting dl_atmos=true")
+		} else if variant.Codecs == "ac-3" {
+			dl_atmos = true
+			dl_aac = false
+			fmt.Println("DEBUG: Selected ac-3 codec, setting dl_atmos=true")
+		} else if variant.Codecs == "mp4a.40.2" {
+			dl_atmos = false
+			dl_aac = true
+			fmt.Println("DEBUG: Selected mp4a.40.2 codec, setting dl_aac=true")
 		} else {
-			if variant.Codecs == "alac" {
-				split := strings.Split(variant.Audio, "-")
-				length := len(split)
-				length_int, err := strconv.Atoi(split[length-2])
-				if err != nil {
-					return "", "", err
-				}
-				if length_int <= Config.AlacMax {
-					if !debug_mode && !more_mode {
-						fmt.Printf("%s-bit / %s Hz\n", split[length-1], split[length-2])
-					}
-					streamUrlTemp, err := masterUrl.Parse(variant.URI)
-					if err != nil {
-						panic(err)
-					}
-					streamUrl = streamUrlTemp
-					KHZ := float64(length_int) / 1000.0
-					Quality = fmt.Sprintf("%sB-%.1fkHz", split[length-1], KHZ)
-					break
-				}
-			}
+			dl_atmos = false
+			dl_aac = false
+			fmt.Println("DEBUG: Selected other codec:", variant.Codecs)
+		}
+
+		streamUrl, err = masterUrl.Parse(variant.URI)
+		if err != nil {
+			return "", "", "", err
 		}
 	}
+
 	if streamUrl == nil {
-		return "", "", errors.New("no codec found")
+		return "", "", "", errors.New("no codec found")
 	}
-	return streamUrl.String(), Quality, nil
+	return streamUrl.String(), Quality, variant.Codecs, nil
 }
 func extractVideo(c string) (string, error) {
 	MediaUrl, err := url.Parse(c)
@@ -2484,6 +2542,17 @@ func extractVideo(c string) (string, error) {
 	}
 
 	return streamUrl.String(), nil
+}
+
+func codecAlternative(availableCodecs map[string][]*m3u8.Variant, priority []string) *m3u8.Variant {
+	for _, codec := range priority {
+		if variants, ok := availableCodecs[codec]; ok {
+			if len(variants) > 0 {
+				return variants[0]
+			}
+		}
+	}
+	return nil
 }
 
 func ripSong(songId string, token string, storefront string, mediaUserToken string) error {
