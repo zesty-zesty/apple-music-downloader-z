@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"main/utils/ampapi"
@@ -37,47 +38,96 @@ import (
 )
 
 var (
-    forbiddenNames = regexp.MustCompile(`[/\\<>:"|?*]`)
-    dl_atmos       bool
-    dl_aac         bool
-    dl_select      bool
-    dl_song        bool
-    artist_select  bool
-    debug_mode     bool
-    alac_max       *int
-    atmos_max      *int
-    mv_max         *int
-    mv_audio_type  *string
-    aac_type       *string
-    codec_priority *[]string
-    Config         structs.ConfigSet
-    counter        structs.Counter
-    okDict         = make(map[string][]int)
-    OutputFolder   string
+	forbiddenNames      = regexp.MustCompile(`[/\\<>:"|?*]`)
+	dl_atmos            bool
+	dl_aac              bool
+	dl_select           bool
+	dl_song             bool
+	artist_select       bool
+	debug_mode          bool
+	alac_max            *int
+	atmos_max           *int
+	mv_max              *int
+	mv_audio_type       *string
+	aac_type            *string
+	codec_priority      *[]string
+	Config              structs.ConfigSet
+	counter             structs.Counter
+	okDict              = make(map[string][]int)
+	OutputFolder        string
+	DownloadConcurrency int
+	statsMu             sync.Mutex
+	okMu                sync.Mutex
 )
 
 func loadConfig() error {
-    data, err := os.ReadFile("config.yaml")
-    if err != nil {
-        return err
-    }
-    err = yaml.Unmarshal(data, &Config)
-    if err != nil {
-        return err
-    }
-    if len(Config.Storefront) != 2 {
-        Config.Storefront = "us"
-    }
-    // 读取 output-folder（不修改外部 ConfigSet 结构）
-    var cfgOut struct {
-        OutputFolder string `yaml:"output-folder"`
-    }
-    _ = yaml.Unmarshal(data, &cfgOut)
-    OutputFolder = strings.TrimSpace(cfgOut.OutputFolder)
-    if OutputFolder == "" {
-        OutputFolder = "output"
-    }
-    return nil
+	data, err := os.ReadFile("config.yaml")
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(data, &Config)
+	if err != nil {
+		return err
+	}
+	if len(Config.Storefront) != 2 {
+		Config.Storefront = "us"
+	}
+	// 读取 output-folder（不修改外部 ConfigSet 结构）
+	var cfgOut struct {
+		OutputFolder string `yaml:"output-folder"`
+	}
+	_ = yaml.Unmarshal(data, &cfgOut)
+	OutputFolder = strings.TrimSpace(cfgOut.OutputFolder)
+	if OutputFolder == "" {
+		OutputFolder = "output"
+	}
+	var cfgConc struct {
+		DownloadConcurrency int `yaml:"download-concurrency"`
+	}
+	_ = yaml.Unmarshal(data, &cfgConc)
+	DownloadConcurrency = cfgConc.DownloadConcurrency
+	if DownloadConcurrency <= 0 {
+		DownloadConcurrency = 4
+	}
+	return nil
+}
+
+// Thread-safe counters and okDict helpers
+func incTotal() {
+	statsMu.Lock()
+	counter.Total++
+	statsMu.Unlock()
+}
+func incSuccess() {
+	statsMu.Lock()
+	counter.Success++
+	statsMu.Unlock()
+}
+func incError() {
+	statsMu.Lock()
+	counter.Error++
+	statsMu.Unlock()
+}
+func incUnavailable() {
+	statsMu.Lock()
+	counter.Unavailable++
+	statsMu.Unlock()
+}
+func addOk(id string, num int) {
+	okMu.Lock()
+	okDict[id] = append(okDict[id], num)
+	okMu.Unlock()
+}
+
+// Thread-safe read of okDict slice for an id
+func getOk(id string) []int {
+	okMu.Lock()
+	s := okDict[id]
+	// make a copy to avoid data race on caller side
+	out := make([]int, len(s))
+	copy(out, s)
+	okMu.Unlock()
+	return out
 }
 
 func LimitString(s string) string {
@@ -764,7 +814,7 @@ func convertIfNeeded(track *task.Track) {
 
 func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	var err error
-	counter.Total++
+	incTotal()
 	fmt.Printf("Track %d of %d: %s\n", track.TaskNum, track.TaskTotal, track.Type)
 
 	//提前获取到的播放列表下track所在的专辑信息
@@ -776,21 +826,21 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	if track.Type == "music-videos" {
 		if len(mediaUserToken) <= 50 {
 			fmt.Println("meida-user-token is not set, skip MV dl")
-			counter.Success++
+			incSuccess()
 			return
 		}
 		if _, err := exec.LookPath("mp4decrypt"); err != nil {
 			fmt.Println("mp4decrypt is not found, skip MV dl")
-			counter.Success++
+			incSuccess()
 			return
 		}
 		err := mvDownloader(track.ID, track.SaveDir, token, track.Storefront, mediaUserToken, track)
 		if err != nil {
 			fmt.Println("\u26A0 Failed to dl MV:", err)
-			counter.Error++
+			incError()
 			return
 		}
-		counter.Success++
+		incSuccess()
 		return
 	}
 
@@ -801,7 +851,7 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	if track.WebM3u8 == "" && !needDlAacLc {
 		if dl_atmos {
 			fmt.Println("Unavailable")
-			counter.Unavailable++
+			incUnavailable()
 			return
 		}
 		fmt.Println("Unavailable, trying to dl aac-lc")
@@ -832,7 +882,7 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 			_, Quality, _, err = extractMedia(track.M3u8, true)
 			if err != nil {
 				fmt.Println("Failed to extract quality from manifest.\n", err)
-				counter.Error++
+				incError()
 				return
 			}
 		}
@@ -910,16 +960,16 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	}
 	if existsOriginal {
 		fmt.Println("Track already exists locally.")
-		counter.Success++
-		okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
+		incSuccess()
+		addOk(track.PreID, track.TaskNum)
 		return
 	}
 	if considerConverted {
 		existsConverted, err2 := fileExists(convertedPath)
 		if err2 == nil && existsConverted {
 			fmt.Println("Converted track already exists locally.")
-			counter.Success++
-			okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
+			incSuccess()
+			addOk(track.PreID, track.TaskNum)
 			return
 		}
 	}
@@ -927,31 +977,31 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	if needDlAacLc {
 		if len(mediaUserToken) <= 50 {
 			fmt.Println("Invalid media-user-token")
-			counter.Error++
+			incError()
 			return
 		}
 		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
 		if err != nil {
 			fmt.Println("Failed to dl aac-lc:", err)
 			if err.Error() == "Unavailable" {
-				counter.Unavailable++
+				incUnavailable()
 				return
 			}
-			counter.Error++
+			incError()
 			return
 		}
 	} else {
 		trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
 		if err != nil {
 			fmt.Println("\u26A0 Failed to extract info from manifest:", err)
-			counter.Unavailable++
+			incUnavailable()
 			return
 		}
 		//边下载边解密
 		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
 		if err != nil {
 			fmt.Println("Failed to run v2:", err)
-			counter.Error++
+			incError()
 			return
 		}
 	}
@@ -972,13 +1022,13 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	cmd := exec.Command("MP4Box", "-itags", tagsString, trackPath)
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Embed failed: %v\n", err)
-		counter.Error++
+		incError()
 		return
 	}
 	if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
 		if err := os.Remove(track.CoverPath); err != nil {
 			fmt.Printf("Error deleting file: %s\n", track.CoverPath)
-			counter.Error++
+			incError()
 			return
 		}
 	}
@@ -986,15 +1036,15 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	err = writeMP4Tags(track, lrc)
 	if err != nil {
 		fmt.Println("\u26A0 Failed to write tags in media:", err)
-		counter.Unavailable++
+		incUnavailable()
 		return
 	}
 
 	// CONVERSION FEATURE hook
 	convertIfNeeded(track)
 
-	counter.Success++
-	okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
+	incSuccess()
+	addOk(track.PreID, track.TaskNum)
 }
 
 func ripStation(albumId string, token string, storefront string, mediaUserToken string) error {
@@ -1030,7 +1080,7 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		fmt.Println(singerFoldername)
 	}
 	// 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder := filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	singerFolder := filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	os.MkdirAll(singerFolder, os.ModePerm)
 	station.SaveDir = singerFolder
 
@@ -1089,9 +1139,9 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		}
 	}
 	if station.Type == "stream" {
-		counter.Total++
-		if isInArray(okDict[station.ID], 1) {
-			counter.Success++
+		incTotal()
+		if isInArray(getOk(station.ID), 1) {
+			incSuccess()
 			return nil
 		}
 		songName := strings.NewReplacer(
@@ -1117,7 +1167,7 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		assetsUrl, serverUrl, err := ampapi.GetStationAssetsUrlAndServerUrl(station.ID, mediaUserToken, token)
 		if err != nil {
 			fmt.Println("Failed to get station assets url.", err)
-			counter.Error++
+			incError()
 			return err
 		}
 		trackM3U8 := strings.ReplaceAll(assetsUrl, "index.m3u8", "256/prog_index.m3u8")
@@ -1125,7 +1175,7 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		err = runv3.ExtMvData(keyAndUrls, trackPath)
 		if err != nil {
 			fmt.Println("Failed to download station stream.", err)
-			counter.Error++
+			incError()
 			return err
 		}
 		tags := []string{
@@ -1147,8 +1197,8 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("Embed failed: %v\n", err)
 		}
-		counter.Success++
-		okDict[station.ID] = append(okDict[station.ID], 1)
+		incSuccess()
+		addOk(station.ID, 1)
 		return nil
 	}
 
@@ -1168,12 +1218,54 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 	if true {
 		selected = arr
 	}
+	// Worker pool for station tracks
+	type dlJob struct {
+		idx int // 1-based index in station.Tracks
+		seq int // sequential TaskNum within toProcess
+	}
+	var toProcess []int
+	doneList := getOk(station.ID)
 	for i := range station.Tracks {
-		i++
-		if isInArray(selected, i) {
-			ripTrack(&station.Tracks[i-1], token, mediaUserToken)
+		num := i + 1
+		if isInArray(doneList, num) {
+			incTotal()
+			incSuccess()
+			continue
+		}
+		if isInArray(selected, num) {
+			toProcess = append(toProcess, num)
 		}
 	}
+	if len(toProcess) == 0 {
+		return nil
+	}
+	jobs := make(chan dlJob, len(toProcess))
+	var wg sync.WaitGroup
+	workerCount := DownloadConcurrency
+	if workerCount > len(toProcess) {
+		workerCount = len(toProcess)
+	}
+	wg.Add(workerCount)
+	for w := 0; w < workerCount; w++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				tk := &station.Tracks[job.idx-1]
+				tk.TaskNum = job.seq
+				tk.TaskTotal = len(toProcess)
+				log.Printf("Start station track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+				ripTrack(tk, token, mediaUserToken)
+				log.Printf("Done  station track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+			}
+		}()
+	}
+	for seq, idx := range toProcess {
+		tr := station.Tracks[idx-1]
+		log.Printf("Enqueue station track %d/%d: %s - %s", seq+1, len(toProcess), tr.Resp.Attributes.ArtistName, tr.Resp.Attributes.Name)
+		jobs <- dlJob{idx: idx, seq: seq + 1}
+	}
+	close(jobs)
+	wg.Wait()
 	return nil
 }
 
@@ -1346,7 +1438,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		}
 	}
 	// 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	os.MkdirAll(singerFolder, os.ModePerm)
 	album.SaveDir = singerFolder
 	stringsToJoin := []string{}
@@ -1482,17 +1574,54 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	} else {
 		selected = album.ShowSelect()
 	}
+	// Worker pool for album tracks
+	type dlJob struct {
+		idx int // 1-based index in album.Tracks
+		seq int // sequential TaskNum within toProcess
+	}
+	var toProcess []int
+	doneList := getOk(albumId)
 	for i := range album.Tracks {
-		i++
-		if isInArray(okDict[albumId], i) {
-			counter.Total++
-			counter.Success++
+		num := i + 1
+		if isInArray(doneList, num) {
+			incTotal()
+			incSuccess()
 			continue
 		}
-		if isInArray(selected, i) {
-			ripTrack(&album.Tracks[i-1], token, mediaUserToken)
+		if isInArray(selected, num) {
+			toProcess = append(toProcess, num)
 		}
 	}
+	if len(toProcess) == 0 {
+		return nil
+	}
+	jobs := make(chan dlJob, len(toProcess))
+	var wg sync.WaitGroup
+	workerCount := DownloadConcurrency
+	if workerCount > len(toProcess) {
+		workerCount = len(toProcess)
+	}
+	wg.Add(workerCount)
+	for w := 0; w < workerCount; w++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				tk := &album.Tracks[job.idx-1]
+				tk.TaskNum = job.seq
+				tk.TaskTotal = len(toProcess)
+				log.Printf("Start album track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+				ripTrack(tk, token, mediaUserToken)
+				log.Printf("Done  album track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+			}
+		}()
+	}
+	for seq, idx := range toProcess {
+		tr := album.Tracks[idx-1]
+		log.Printf("Enqueue album track %d/%d: %s - %s", seq+1, len(toProcess), tr.Resp.Attributes.ArtistName, tr.Resp.Attributes.Name)
+		jobs <- dlJob{idx: idx, seq: seq + 1}
+	}
+	close(jobs)
+	wg.Wait()
 	return nil
 
 }
@@ -1659,7 +1788,7 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		}
 	}
 	// 使用统一的输出根目录，不再根据 codec 分类保存目录
-    singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	singerFolder = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	os.MkdirAll(singerFolder, os.ModePerm)
 	playlist.SaveDir = singerFolder
 	stringsToJoin := []string{}
@@ -1770,17 +1899,56 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	} else {
 		selected = playlist.ShowSelect()
 	}
+	// Worker pool for playlist tracks
+	type dlJob struct {
+		idx int
+		seq int
+	}
+	toProcess := []int{}
 	for i := range playlist.Tracks {
-		i++
-		if isInArray(okDict[playlistId], i) {
-			counter.Total++
-			counter.Success++
+		num := i + 1
+		if isInArray(getOk(playlistId), num) {
+			incTotal()
+			incSuccess()
 			continue
 		}
-		if isInArray(selected, i) {
-			ripTrack(&playlist.Tracks[i-1], token, mediaUserToken)
+		if isInArray(selected, num) {
+			toProcess = append(toProcess, num)
 		}
 	}
+	if len(toProcess) == 0 {
+		return nil
+	}
+	workerCount := DownloadConcurrency
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if workerCount > len(toProcess) {
+		workerCount = len(toProcess)
+	}
+	jobs := make(chan dlJob, len(toProcess))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for w := 0; w < workerCount; w++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				tk := &playlist.Tracks[job.idx-1]
+				tk.TaskNum = job.seq
+				tk.TaskTotal = len(toProcess)
+				log.Printf("Start playlist track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+				ripTrack(tk, token, mediaUserToken)
+				log.Printf("Done  playlist track %d/%d: %s - %s", tk.TaskNum, tk.TaskTotal, tk.Resp.Attributes.ArtistName, tk.Resp.Attributes.Name)
+			}
+		}()
+	}
+	for seq, idx := range toProcess {
+		tr := playlist.Tracks[idx-1]
+		log.Printf("Enqueue playlist track %d/%d: %s - %s", seq+1, len(toProcess), tr.Resp.Attributes.ArtistName, tr.Resp.Attributes.Name)
+		jobs <- dlJob{idx: idx, seq: seq + 1}
+	}
+	close(jobs)
+	wg.Wait()
 	return nil
 }
 
@@ -1879,6 +2047,9 @@ func main() {
 		fmt.Printf("load Config failed: %v", err)
 		return
 	}
+	// 仅打印时分秒，不打印毫秒
+	log.SetFlags(log.LstdFlags &^ log.Lmicroseconds)
+	log.SetPrefix("[AMD] ")
 	token, err := ampapi.GetToken()
 	if err != nil {
 		if Config.AuthorizationToken != "" && Config.AuthorizationToken != "your-authorization-token" {
@@ -1889,7 +2060,9 @@ func main() {
 		}
 	}
 	var search_type string
+	var interactive bool
 	pflag.StringVar(&search_type, "search", "", "Search for 'album', 'song', or 'artist'. Provide query after flags.")
+	pflag.BoolVar(&interactive, "interactive", false, "Run in interactive REPL mode")
 	pflag.BoolVar(&dl_atmos, "atmos", false, "Enable atmos download mode")
 	pflag.BoolVar(&dl_aac, "aac", false, "Enable adm-aac download mode")
 	pflag.BoolVar(&dl_select, "select", false, "Enable selective download")
@@ -1994,9 +2167,9 @@ func main() {
 					"{ArtistId}", "",
 				).Replace(Config.ArtistFolderFormat)
 				if mvSaveDir != "" {
-                    mvSaveDir = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(mvSaveDir, "_"))
+					mvSaveDir = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(mvSaveDir, "_"))
 				} else {
-                    mvSaveDir = OutputFolder
+					mvSaveDir = OutputFolder
 				}
 				storefront, albumId = checkUrlMv(urlRaw)
 				err := mvDownloader(albumId, mvSaveDir, token, storefront, Config.MediaUserToken, nil)

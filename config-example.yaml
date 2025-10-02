@@ -13,6 +13,7 @@ cover-size: 5000x5000
 cover-format: jpg       #jpg png or original
 # Unified output root folder (all downloads go under this)
 output-folder: ./output
+download-concurrency: 4  # 并发下载的最大线程数
 max-memory-limit: 256 # MB
 decrypt-m3u8-port: "127.0.0.1:10020"
 get-m3u8-port: "127.0.0.1:20020"
