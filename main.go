@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"main/utils/ampapi"
@@ -34,6 +35,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/pflag"
 	"github.com/zhaarey/go-mp4tag"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v2"
 )
 
@@ -58,6 +60,29 @@ var (
 	DownloadConcurrency int
 	statsMu             sync.Mutex
 	okMu                sync.Mutex
+	// 活跃任务计数（用于进度渲染）
+	activeDownloads int32
+	// 输入状态：交互式用户正在输入，暂停渲染器输出
+	inputActive int32
+	// 运行时覆盖的 codec-priority，仅本次运行有效
+    RuntimeCodecPriority []string
+    // 进度刷新通道（事件驱动）
+    progressCh chan struct{}
+    // 运行期问题记录（详情输出使用）
+    issueMu          sync.Mutex
+    warningMessages  []string
+    errorMessages    []string
+    // 失败项记录与重试模式
+    failMu    sync.Mutex
+    failDict  map[string]map[int]struct{}
+    // 实体级失败记录（album/playlist/station 等在进入阶段失败时）
+    failEntityMu sync.Mutex
+    failEntity   = make(map[string]struct{})
+    retryOnly bool
+    // 真正的总数，用于状态栏显示
+    actualTotal int
+    // 交互模式标志
+    interactive bool
 )
 
 func loadConfig() error {
@@ -94,29 +119,106 @@ func loadConfig() error {
 
 // Thread-safe counters and okDict helpers
 func incTotal() {
-	statsMu.Lock()
-	counter.Total++
-	statsMu.Unlock()
+    statsMu.Lock()
+    counter.Total++
+    statsMu.Unlock()
+    signalProgress()
 }
 func incSuccess() {
-	statsMu.Lock()
-	counter.Success++
-	statsMu.Unlock()
+    statsMu.Lock()
+    counter.Success++
+    statsMu.Unlock()
+    signalProgress()
 }
 func incError() {
-	statsMu.Lock()
-	counter.Error++
-	statsMu.Unlock()
+    statsMu.Lock()
+    counter.Error++
+    statsMu.Unlock()
+    signalProgress()
 }
 func incUnavailable() {
-	statsMu.Lock()
-	counter.Unavailable++
-	statsMu.Unlock()
+    statsMu.Lock()
+    counter.Unavailable++
+    statsMu.Unlock()
+    signalProgress()
+}
+func incNotSong() {
+    statsMu.Lock()
+    counter.NotSong++
+    statsMu.Unlock()
+    signalProgress()
 }
 func addOk(id string, num int) {
-	okMu.Lock()
-	okDict[id] = append(okDict[id], num)
-	okMu.Unlock()
+    okMu.Lock()
+    okDict[id] = append(okDict[id], num)
+    okMu.Unlock()
+}
+
+// 失败项记录与查询
+func addFail(id string, num int) {
+    failMu.Lock()
+    if failDict == nil {
+        failDict = make(map[string]map[int]struct{})
+    }
+    set, ok := failDict[id]
+    if !ok {
+        set = make(map[int]struct{})
+        failDict[id] = set
+    }
+    set[num] = struct{}{}
+    failMu.Unlock()
+}
+func removeFail(id string, num int) {
+    failMu.Lock()
+    if set, ok := failDict[id]; ok {
+        delete(set, num)
+        if len(set) == 0 {
+            delete(failDict, id)
+        }
+    }
+    failMu.Unlock()
+}
+func getFail(id string) []int {
+    failMu.Lock()
+    set, ok := failDict[id]
+    failMu.Unlock()
+    if !ok {
+        return nil
+    }
+    out := make([]int, 0, len(set))
+    for n := range set {
+        out = append(out, n)
+    }
+    sort.Ints(out)
+    return out
+}
+func clearFail() {
+    failMu.Lock()
+    failDict = make(map[string]map[int]struct{})
+    failMu.Unlock()
+}
+
+// 实体级失败记录与查询
+func addEntityFail(id string) {
+    failEntityMu.Lock()
+    failEntity[id] = struct{}{}
+    failEntityMu.Unlock()
+}
+func removeEntityFail(id string) {
+    failEntityMu.Lock()
+    delete(failEntity, id)
+    failEntityMu.Unlock()
+}
+func hasEntityFail(id string) bool {
+    failEntityMu.Lock()
+    _, ok := failEntity[id]
+    failEntityMu.Unlock()
+    return ok
+}
+func clearEntityFail() {
+    failEntityMu.Lock()
+    failEntity = make(map[string]struct{})
+    failEntityMu.Unlock()
 }
 
 // Thread-safe read of okDict slice for an id
@@ -128,6 +230,171 @@ func getOk(id string) []int {
 	copy(out, s)
 	okMu.Unlock()
 	return out
+}
+
+// 当前 codec 优先级：优先使用运行时覆盖，其次使用配置
+func currentCodecPriority() []string {
+    if len(RuntimeCodecPriority) > 0 {
+        return RuntimeCodecPriority
+    }
+    return Config.CodecPriority
+}
+
+// 发出一次进度刷新信号（非阻塞）
+func signalProgress() {
+    if progressCh != nil {
+        select {
+        case progressCh <- struct{}{}:
+        default:
+        }
+    }
+}
+
+// --- 终端屏幕控制辅助 ---
+func termSize() (rows, cols int) {
+    fd := int(os.Stdout.Fd())
+    w, h, err := term.GetSize(fd)
+    if err != nil || h <= 0 || w <= 0 {
+        // 退化到常规单行刷新
+        return 0, 0
+    }
+    return h, w
+}
+
+func saveCursor() { fmt.Print("\x1b[s") }
+func restoreCursor() { fmt.Print("\x1b[u") }
+func moveCursor(row, col int) { fmt.Printf("\x1b[%d;%dH", row, col) }
+func clearLine() { fmt.Print("\x1b[2K") }
+func clearScreen() { fmt.Print("\x1b[2J\x1b[H") }
+// 设置滚动区域：保留底部最后一行为状态栏，避免日志将其顶上去
+func setScrollRegion(top, bottom int) { fmt.Printf("\x1b[%d;%dr", top, bottom) }
+// 将滚动区域恢复为整屏
+func resetScrollRegion() { fmt.Print("\x1b[r") }
+
+func renderBottom(line string) {
+    rows, cols := termSize()
+    if rows <= 0 || cols <= 0 {
+        // 非 TTY 或无法获取尺寸：运行期不刷新，由调用方在任务结束时打印一次汇总
+        return
+    }
+    // 保持当前光标位置
+    saveCursor()
+    // 移动到最底行，清行后输出
+    moveCursor(rows, 1)
+    clearLine()
+    // 适配宽度：截断或右侧填充
+    if len([]rune(line)) > cols {
+        r := []rune(line)
+        line = string(r[:cols])
+    } else {
+        line = fmt.Sprintf("%-*s", cols, line)
+    }
+    // 灰色背景（明黑背景 100），避免影响其他行，结束后立刻重置样式
+    fmt.Print("\x1b[100m")
+    fmt.Print(line)
+    fmt.Print("\x1b[0m")
+    // 恢复光标位置
+    restoreCursor()
+}
+
+// 问题记录与打印
+func addWarning(msg string) {
+    issueMu.Lock()
+    warningMessages = append(warningMessages, msg)
+    issueMu.Unlock()
+}
+func addError(msg string) {
+    issueMu.Lock()
+    errorMessages = append(errorMessages, msg)
+    issueMu.Unlock()
+}
+func clearIssues() {
+    issueMu.Lock()
+    warningMessages = nil
+    errorMessages = nil
+    issueMu.Unlock()
+}
+func printIssuesSummary() {
+    issueMu.Lock()
+    w := append([]string{}, warningMessages...)
+    e := append([]string{}, errorMessages...)
+    issueMu.Unlock()
+    if len(w) == 0 && len(e) == 0 {
+        return
+    }
+    fmt.Println("---- 详细信息 ----")
+    if len(w) > 0 {
+        fmt.Println("Warnings:")
+        for _, m := range w {
+            fmt.Println(" - ", m)
+        }
+    }
+    if len(e) > 0 {
+        fmt.Println("Errors:")
+        for _, m := range e {
+            fmt.Println(" - ", m)
+        }
+    }
+}
+
+func askYesNo(prompt string) bool {
+    fmt.Print(prompt)
+    atomic.StoreInt32(&inputActive, 1)
+    r := bufio.NewReader(os.Stdin)
+    s, _ := r.ReadString('\n')
+    atomic.StoreInt32(&inputActive, 0)
+    s = strings.TrimSpace(strings.ToLower(s))
+    return s == "y" || s == "yes"
+}
+
+// 进度渲染：事件驱动的底部刷新
+func startProgressRenderer() func() {
+    stop := make(chan struct{})
+    if progressCh == nil {
+        progressCh = make(chan struct{}, 32)
+    }
+    go func() {
+        // 设置滚动区域：锁定最后一行为状态栏
+        rows, _ := termSize()
+        if rows > 1 {
+            setScrollRegion(1, rows-1)
+        }
+        // 初始渲染：进入交互模式即在底部常驻显示一次状态栏
+        statsMu.Lock()
+        c := counter
+        statsMu.Unlock()
+        warnings := c.Unavailable + c.NotSong
+        active := atomic.LoadInt32(&activeDownloads)
+        line := fmt.Sprintf("[AMD] Active:%d  Done/All:%d/%d  Warnings:%d  Errors:%d",
+            active, c.Success, c.Total, warnings, c.Error)
+        renderBottom(line)
+        for {
+            select {
+            case <-progressCh:
+                // 快照读取计数，避免竞争
+                statsMu.Lock()
+                c := counter
+                statsMu.Unlock()
+                warnings := c.Unavailable + c.NotSong
+                active := atomic.LoadInt32(&activeDownloads)
+                line := fmt.Sprintf("[AMD] Active:%d  Done/All:%d/%d  Warnings:%d  Errors:%d",
+                    active, c.Success, c.Total, warnings, c.Error)
+                renderBottom(line)
+            case <-stop:
+                // 清理底部行
+                rows, _ := termSize()
+                if rows > 0 {
+                    saveCursor(); moveCursor(rows, 1); clearLine(); restoreCursor()
+                    // 恢复滚动区域为整屏
+                    resetScrollRegion()
+                } else {
+                    fmt.Print("\r")
+                }
+                return
+            }
+        }
+    }()
+    return func() { close(stop) }
 }
 
 func LimitString(s string) string {
@@ -219,13 +486,13 @@ func checkUrlArtist(url string) (string, string) {
 	}
 }
 func getUrlSong(songUrl string, token string) (string, error) {
-	storefront, songId := checkUrlSong(songUrl)
-	manifest, err := ampapi.GetSongResp(storefront, songId, Config.Language, token)
-	if err != nil {
-		fmt.Println("\u26A0 Failed to get manifest:", err)
-		counter.NotSong++
-		return "", err
-	}
+    storefront, songId := checkUrlSong(songUrl)
+    manifest, err := ampapi.GetSongResp(storefront, songId, Config.Language, token)
+    if err != nil {
+        fmt.Println("\u26A0 Failed to get manifest:", err)
+        incNotSong()
+        return "", err
+    }
 	albumId := manifest.Data[0].Relationships.Albums.Data[0].ID
 	songAlbumUrl := fmt.Sprintf("https://music.apple.com/%s/album/1/%s?i=%s", storefront, albumId, songId)
 	return songAlbumUrl, nil
@@ -813,8 +1080,14 @@ func convertIfNeeded(track *task.Track) {
 }
 
 func ripTrack(track *task.Track, token string, mediaUserToken string) {
-	var err error
-	incTotal()
+    var err error
+    atomic.AddInt32(&activeDownloads, 1)
+    signalProgress()
+    defer func() {
+        atomic.AddInt32(&activeDownloads, -1)
+        signalProgress()
+    }()
+    incTotal()
 	fmt.Printf("Track %d of %d: %s\n", track.TaskNum, track.TaskTotal, track.Type)
 
 	//提前获取到的播放列表下track所在的专辑信息
@@ -823,23 +1096,29 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	}
 
 	//mv dl dev
-	if track.Type == "music-videos" {
-		if len(mediaUserToken) <= 50 {
-			fmt.Println("meida-user-token is not set, skip MV dl")
-			incSuccess()
-			return
-		}
-		if _, err := exec.LookPath("mp4decrypt"); err != nil {
-			fmt.Println("mp4decrypt is not found, skip MV dl")
-			incSuccess()
-			return
-		}
-		err := mvDownloader(track.ID, track.SaveDir, token, track.Storefront, mediaUserToken, track)
-		if err != nil {
-			fmt.Println("\u26A0 Failed to dl MV:", err)
-			incError()
-			return
-		}
+    if track.Type == "music-videos" {
+        if len(mediaUserToken) <= 50 {
+            fmt.Println("meida-user-token is not set, skip MV dl")
+            incSuccess()
+            addWarning("MV skipped: media-user-token not set")
+            return
+        }
+        if _, err := exec.LookPath("mp4decrypt"); err != nil {
+            fmt.Println("mp4decrypt is not found, skip MV dl")
+            incSuccess()
+            addWarning("MV skipped: mp4decrypt not found")
+            return
+        }
+        // 歌曲上下文标签用于即时错误提示
+        songTag := fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name)
+        err := mvDownloader(track.ID, track.SaveDir, token, track.Storefront, mediaUserToken, track)
+        if err != nil {
+            fmt.Println("\u26A0 Failed to dl MV:", songTag, err)
+            incError()
+            addFail(track.PreID, track.TaskNum)
+            addError(fmt.Sprintf("%s MV download failed: %v", songTag, err))
+            return
+        }
 		incSuccess()
 		return
 	}
@@ -848,15 +1127,17 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	if dl_aac && Config.AacType == "aac-lc" {
 		needDlAacLc = true
 	}
-	if track.WebM3u8 == "" && !needDlAacLc {
-		if dl_atmos {
-			fmt.Println("Unavailable")
-			incUnavailable()
-			return
-		}
-		fmt.Println("Unavailable, trying to dl aac-lc")
-		needDlAacLc = true
-	}
+    if track.WebM3u8 == "" && !needDlAacLc {
+        if dl_atmos {
+            fmt.Println("Unavailable")
+            incUnavailable()
+            addFail(track.PreID, track.TaskNum)
+            addWarning("Atmos unavailable, fallback not possible")
+            return
+        }
+        fmt.Println("Unavailable, trying to dl aac-lc")
+        needDlAacLc = true
+    }
 	needCheck := false
 
 	if Config.GetM3u8Mode == "all" {
@@ -882,9 +1163,10 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 			_, Quality, _, err = extractMedia(track.M3u8, true)
 			if err != nil {
 				fmt.Println("Failed to extract quality from manifest.\n", err)
-				incError()
-				return
-			}
+                incError()
+                addFail(track.PreID, track.TaskNum)
+                return
+            }
 		}
 	}
 	track.Quality = Quality
@@ -974,77 +1256,93 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		}
 	}
 
-	if needDlAacLc {
-		if len(mediaUserToken) <= 50 {
-			fmt.Println("Invalid media-user-token")
-			incError()
-			return
-		}
-		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
-		if err != nil {
-			fmt.Println("Failed to dl aac-lc:", err)
-			if err.Error() == "Unavailable" {
-				incUnavailable()
-				return
-			}
-			incError()
-			return
-		}
-	} else {
-		trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
-		if err != nil {
-			fmt.Println("\u26A0 Failed to extract info from manifest:", err)
-			incUnavailable()
-			return
-		}
-		//边下载边解密
-		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
-		if err != nil {
-			fmt.Println("Failed to run v2:", err)
-			incError()
-			return
-		}
-	}
+    if needDlAacLc {
+        if len(mediaUserToken) <= 50 {
+            fmt.Println("Invalid media-user-token:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+            incError()
+            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: invalid media-user-token", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+            return
+        }
+        _, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
+        if err != nil {
+            fmt.Println("Failed to dl aac-lc:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+            if err.Error() == "Unavailable" {
+                incUnavailable()
+                addWarning("AAC-LC unavailable")
+                return
+            }
+            incError()
+            addFail(track.PreID, track.TaskNum)
+            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+            return
+        }
+    } else {
+        trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
+        if err != nil {
+            fmt.Println("\u26A0 Failed to extract info from manifest:", err)
+            incUnavailable()
+            addFail(track.PreID, track.TaskNum)
+            addWarning(fmt.Sprintf("Manifest extract failed: %v", err))
+            return
+        }
+        //边下载边解密
+        err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
+        if err != nil {
+            fmt.Println("Failed to run v2:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+            incError()
+            addFail(track.PreID, track.TaskNum)
+            addError(fmt.Sprintf("[%s - %s] HLS run failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+            return
+        }
+    }
 	tags := []string{
 		"tool=",
 		fmt.Sprintf("artist=%s", track.Resp.Attributes.ArtistName),
 	}
-	if Config.EmbedCover {
-		if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
-			track.CoverPath, err = writeCover(track.SaveDir, track.ID, track.Resp.Attributes.Artwork.URL)
-			if err != nil {
-				fmt.Println("Failed to write cover.")
-			}
-		}
-		tags = append(tags, fmt.Sprintf("cover=%s", track.CoverPath))
-	}
+    if Config.EmbedCover {
+        if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
+            track.CoverPath, err = writeCover(track.SaveDir, track.ID, track.Resp.Attributes.Artwork.URL)
+            if err != nil {
+                fmt.Println("Failed to write cover.")
+                addWarning("Embed cover failed")
+            }
+        }
+        tags = append(tags, fmt.Sprintf("cover=%s", track.CoverPath))
+    }
 	tagsString := strings.Join(tags, ":")
 	cmd := exec.Command("MP4Box", "-itags", tagsString, trackPath)
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("Embed failed: %v\n", err)
-		incError()
-		return
-	}
+    if err := cmd.Run(); err != nil {
+        fmt.Printf("Embed failed %s: %v\n", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+        incError()
+        addFail(track.PreID, track.TaskNum)
+        addError(fmt.Sprintf("[%s - %s] Tag embed failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+        return
+    }
 	if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
-		if err := os.Remove(track.CoverPath); err != nil {
-			fmt.Printf("Error deleting file: %s\n", track.CoverPath)
-			incError()
-			return
-		}
+    if err := os.Remove(track.CoverPath); err != nil {
+        fmt.Printf("Error deleting file %s: %s\n", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), track.CoverPath)
+        incError()
+        addFail(track.PreID, track.TaskNum)
+        addError(fmt.Sprintf("[%s - %s] Delete cover failed: %s", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, track.CoverPath))
+        return
+    }
 	}
 	track.SavePath = trackPath
-	err = writeMP4Tags(track, lrc)
-	if err != nil {
-		fmt.Println("\u26A0 Failed to write tags in media:", err)
-		incUnavailable()
-		return
-	}
+    err = writeMP4Tags(track, lrc)
+    if err != nil {
+        fmt.Println("\u26A0 Failed to write tags in media:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+        incUnavailable()
+        addFail(track.PreID, track.TaskNum)
+        addWarning(fmt.Sprintf("Write MP4 tags failed: %v", err))
+        return
+    }
 
 	// CONVERSION FEATURE hook
 	convertIfNeeded(track)
 
-	incSuccess()
-	addOk(track.PreID, track.TaskNum)
+    incSuccess()
+    addOk(track.PreID, track.TaskNum)
+    removeFail(track.PreID, track.TaskNum)
 }
 
 func ripStation(albumId string, token string, storefront string, mediaUserToken string) error {
@@ -1213,11 +1511,15 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 	for i := 0; i < trackTotal; i++ {
 		arr[i] = i + 1
 	}
-	var selected []int
-
-	if true {
-		selected = arr
-	}
+    var selected []int
+    if retryOnly {
+        selected = getFail(station.ID)
+        if len(selected) == 0 {
+            selected = arr
+        }
+    } else {
+        selected = arr
+    }
 	// Worker pool for station tracks
 	type dlJob struct {
 		idx int // 1-based index in station.Tracks
@@ -1568,12 +1870,17 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		}
 		return nil
 	}
-	var selected []int
-	if !dl_select {
-		selected = arr
-	} else {
-		selected = album.ShowSelect()
-	}
+    var selected []int
+    if retryOnly {
+        selected = getFail(albumId)
+        if len(selected) == 0 {
+            selected = arr
+        }
+    } else if !dl_select {
+        selected = arr
+    } else {
+        selected = album.ShowSelect()
+    }
 	// Worker pool for album tracks
 	type dlJob struct {
 		idx int // 1-based index in album.Tracks
@@ -1892,13 +2199,17 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	for i := 0; i < trackTotal; i++ {
 		arr[i] = i + 1
 	}
-	var selected []int
-
-	if !dl_select {
-		selected = arr
-	} else {
-		selected = playlist.ShowSelect()
-	}
+    var selected []int
+    if retryOnly {
+        selected = getFail(playlistId)
+        if len(selected) == 0 {
+            selected = arr
+        }
+    } else if !dl_select {
+        selected = arr
+    } else {
+        selected = playlist.ShowSelect()
+    }
 	// Worker pool for playlist tracks
 	type dlJob struct {
 		idx int
@@ -2060,9 +2371,8 @@ func main() {
 		}
 	}
 	var search_type string
-	var interactive bool
 	pflag.StringVar(&search_type, "search", "", "Search for 'album', 'song', or 'artist'. Provide query after flags.")
-	pflag.BoolVar(&interactive, "interactive", false, "Run in interactive REPL mode")
+	pflag.BoolVar(&interactive, "interactive", true, "Run in interactive REPL mode")
 	pflag.BoolVar(&dl_atmos, "atmos", false, "Enable atmos download mode")
 	pflag.BoolVar(&dl_aac, "aac", false, "Enable adm-aac download mode")
 	pflag.BoolVar(&dl_select, "select", false, "Enable selective download")
@@ -2092,6 +2402,13 @@ func main() {
 	Config.CodecPriority = *codec_priority
 
 	args := pflag.Args()
+
+	// 如果开启交互式模式，则进入 REPL
+	if interactive {
+		fmt.Println("进入交互式模式。输入 'help' 查看可用命令，'exit' 退出。")
+		runInteractive(token)
+		return
+	}
 
 	if search_type != "" {
 		if len(args) == 0 {
@@ -2191,6 +2508,9 @@ func main() {
 				err := ripSong(songId, token, storefront, Config.MediaUserToken)
 				if err != nil {
 					fmt.Println("Failed to rip song:", err)
+					addEntityFail(songId)
+				} else {
+					removeEntityFail(songId)
 				}
 				continue
 			}
@@ -2206,6 +2526,9 @@ func main() {
 				err := ripAlbum(albumId, token, storefront, Config.MediaUserToken, urlArg_i)
 				if err != nil {
 					fmt.Println("Failed to rip album:", err)
+					addEntityFail(albumId)
+				} else {
+					removeEntityFail(albumId)
 				}
 			} else if strings.Contains(urlRaw, "/playlist/") {
 				fmt.Println("Playlist")
@@ -2213,6 +2536,9 @@ func main() {
 				err := ripPlaylist(albumId, token, storefront, Config.MediaUserToken)
 				if err != nil {
 					fmt.Println("Failed to rip playlist:", err)
+					addEntityFail(albumId)
+				} else {
+					removeEntityFail(albumId)
 				}
 			} else if strings.Contains(urlRaw, "/station/") {
 				fmt.Printf("Station")
@@ -2224,20 +2550,37 @@ func main() {
 				err := ripStation(albumId, token, storefront, Config.MediaUserToken)
 				if err != nil {
 					fmt.Println("Failed to rip station:", err)
+					addEntityFail(albumId)
+				} else {
+					removeEntityFail(albumId)
 				}
 			} else {
 				fmt.Println("Invalid type")
 			}
 		}
-		fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
-		if counter.Error == 0 {
-			break
-		}
-		fmt.Println("Error detected, press Enter to try again...")
-		fmt.Scanln()
-		fmt.Println("Start trying again...")
-		counter = structs.Counter{}
-	}
+        // 非交互模式下显示统计信息
+        if !interactive {
+            fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
+        }
+        // 打印详细告警/错误信息
+        printIssuesSummary()
+        if counter.Error == 0 {
+            break
+        }
+        if !askYesNo("检测到错误，是否重试失败项? (y/N) ") {
+            break
+        }
+        fmt.Println("Start trying again...")
+        clearIssues()
+        retryOnly = true
+        counter = structs.Counter{}
+        // 第二轮重试结束后关闭仅重试失败模式
+        // 清理失败集合，避免后续批次复用
+        // 注：具体重试体将在下一轮 for 内处理
+    }
+    retryOnly = false
+    clearFail()
+    clearEntityFail()
 }
 
 func mvDownloader(adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track) error {
@@ -2613,7 +2956,7 @@ func extractMedia(b string, more_mode bool) (string, string, string, error) {
 	}
 
 	var variant *m3u8.Variant
-	variant = codecAlternative(codecVariants, Config.CodecPriority)
+	variant = codecAlternative(codecVariants, currentCodecPriority())
 	if variant != nil {
 		// 根据选择的编码设置正确的dl_atmos和dl_aac标志
 		if variant.Codecs == "ec-3" && strings.Contains(variant.Audio, "atmos") {
@@ -2741,4 +3084,290 @@ func ripSong(songId string, token string, storefront string, mediaUserToken stri
 	}
 
 	return nil
+}
+
+// 处理单个 URL 的包装函数，便于 REPL 调用
+func handleSingleURL(urlRaw string, token string) {
+	if strings.Contains(urlRaw, "/artist/") {
+		urlArtistName, urlArtistID, err := getUrlArtistName(urlRaw, token)
+		if err != nil {
+			fmt.Println("Failed to get artistname.")
+			return
+		}
+		Config.ArtistFolderFormat = strings.NewReplacer(
+			"{UrlArtistName}", LimitString(urlArtistName),
+			"{ArtistId}", urlArtistID,
+		).Replace(Config.ArtistFolderFormat)
+		albumArgs, err := checkArtist(urlRaw, token, "albums")
+		if err != nil {
+			fmt.Println("Failed to get artist albums.")
+			return
+		}
+		mvArgs, err := checkArtist(urlRaw, token, "music-videos")
+		if err != nil {
+			fmt.Println("Failed to get artist music-videos.")
+		}
+		for _, a := range append(albumArgs, mvArgs...) {
+			handleSingleURL(a, token)
+		}
+		return
+	}
+
+	var storefront, albumId string
+	parse, err := url.Parse(urlRaw)
+	if err != nil {
+		log.Fatalf("Invalid URL: %v", err)
+	}
+	var urlArg_i = parse.Query().Get("i")
+
+	if strings.Contains(urlRaw, "/music-video/") {
+		fmt.Println("Music Video")
+		if debug_mode {
+			return
+		}
+		incTotal()
+		if len(Config.MediaUserToken) <= 50 {
+			fmt.Println(": meida-user-token is not set, skip MV dl")
+			incSuccess()
+			return
+		}
+		if _, err := exec.LookPath("mp4decrypt"); err != nil {
+			fmt.Println(": mp4decrypt is not found, skip MV dl")
+			incSuccess()
+			return
+		}
+		mvSaveDir := strings.NewReplacer(
+			"{ArtistName}", "",
+			"{UrlArtistName}", "",
+			"{ArtistId}", "",
+		).Replace(Config.ArtistFolderFormat)
+		if mvSaveDir != "" {
+			mvSaveDir = filepath.Join(OutputFolder, forbiddenNames.ReplaceAllString(mvSaveDir, "_"))
+		} else {
+			mvSaveDir = OutputFolder
+		}
+		storefront, albumId = checkUrlMv(urlRaw)
+		err := mvDownloader(albumId, mvSaveDir, token, storefront, Config.MediaUserToken, nil)
+		if err != nil {
+			fmt.Println("\u26A0 Failed to dl MV:", err)
+			incError()
+			return
+		}
+		incSuccess()
+		return
+	}
+
+    if strings.Contains(urlRaw, "/song/") {
+        fmt.Printf("Song->")
+        storefront, songId := checkUrlSong(urlRaw)
+        if storefront == "" || songId == "" {
+            fmt.Println("Invalid song URL format.")
+            addError("Invalid song URL format")
+            return
+        }
+        err := ripSong(songId, token, storefront, Config.MediaUserToken)
+        if err != nil {
+            fmt.Println("Failed to rip song:", err)
+            addError(fmt.Sprintf("Rip song failed: %v", err))
+            addEntityFail(songId)
+        } else {
+            removeEntityFail(songId)
+        }
+        return
+    }
+
+    if strings.Contains(urlRaw, "/album/") {
+        fmt.Println("Album")
+        storefront, albumId = checkUrl(urlRaw)
+        err := ripAlbum(albumId, token, storefront, Config.MediaUserToken, urlArg_i)
+        if err != nil {
+            fmt.Println("Failed to rip album:", err)
+            addError(fmt.Sprintf("Rip album failed: %v", err))
+            addEntityFail(albumId)
+        } else {
+            removeEntityFail(albumId)
+        }
+        return
+    }
+    if strings.Contains(urlRaw, "/playlist/") {
+        fmt.Println("Playlist")
+        storefront, albumId = checkUrlPlaylist(urlRaw)
+        err := ripPlaylist(albumId, token, storefront, Config.MediaUserToken)
+        if err != nil {
+            fmt.Println("Failed to rip playlist:", err)
+            addError(fmt.Sprintf("Rip playlist failed: %v", err))
+            addEntityFail(albumId)
+        } else {
+            removeEntityFail(albumId)
+        }
+        return
+    }
+    if strings.Contains(urlRaw, "/station/") {
+        fmt.Printf("Station")
+        storefront, albumId = checkUrlStation(urlRaw)
+        if len(Config.MediaUserToken) <= 50 {
+            fmt.Println(": meida-user-token is not set, skip station dl")
+            addWarning("Station skipped: media-user-token not set")
+            return
+        }
+        err := ripStation(albumId, token, storefront, Config.MediaUserToken)
+        if err != nil {
+            fmt.Println("Failed to rip station:", err)
+            addError(fmt.Sprintf("Rip station failed: %v", err))
+            addEntityFail(albumId)
+        } else {
+            removeEntityFail(albumId)
+        }
+        return
+    }
+	fmt.Println("Invalid type")
+}
+
+// 交互式 REPL：支持 help、exit、rip <url>、search、concurrency
+func runInteractive(token string) {
+    stopProgress := startProgressRenderer()
+    defer stopProgress()
+    // 进入交互时清屏，腾出整个终端区域
+    clearScreen()
+    reader := bufio.NewReader(os.Stdin)
+    for {
+        // 清屏并将提示符定位到倒数第二行
+        rows, _ := termSize()
+        if rows > 1 {
+            moveCursor(rows-1, 1)
+            clearLine()
+            fmt.Print("> ")
+        } else {
+            // 退化：无法获取终端尺寸
+            fmt.Print("\n> ")
+        }
+        // 标记输入期
+        atomic.StoreInt32(&inputActive, 1)
+        line, err := reader.ReadString('\n')
+        if err != nil {
+            if errors.Is(err, io.EOF) {
+                fmt.Println("EOF. Exiting.")
+                return
+            }
+            fmt.Println("Read error:", err)
+            atomic.StoreInt32(&inputActive, 0)
+            continue
+        }
+        atomic.StoreInt32(&inputActive, 0)
+        cmd := strings.TrimSpace(line)
+        if cmd == "" {
+            continue
+        }
+		parts := strings.Fields(cmd)
+		switch parts[0] {
+		case "exit", "quit":
+			fmt.Println("Bye.")
+			return
+		case "help":
+			fmt.Println("Commands:")
+			fmt.Println("  rip <url>            下载指定 URL (album|playlist|station|song)")
+			fmt.Println("  search <type> <kw>   搜索 album|song|artist 并选择")
+			fmt.Println("  concurrency <N>      设置下载并发线程数")
+			fmt.Println("  codec-priority <list> 设置编码优先级，逗号分隔，如: alac,mp4a.40.2,ec-3")
+			fmt.Println("  codec-priority show  显示当前运行时与配置的编码优先级")
+			fmt.Println("  flags                显示当前下载相关标志")
+			fmt.Println("  exit                 退出")
+        case "rip":
+            if len(parts) < 2 {
+                fmt.Println("Usage: rip <url>")
+                continue
+            }
+            clearIssues()
+            handleSingleURL(parts[1], token)
+            // 任务完成后显示详细的 warning/error 信息，并询问是否重试
+            printIssuesSummary()
+            for counter.Error > 0 {
+                if !askYesNo("是否重试失败项? (y/N) ") {
+                    break
+                }
+                clearIssues()
+                retryOnly = true
+                handleSingleURL(parts[1], token)
+                retryOnly = false
+                printIssuesSummary()
+            }
+            clearFail()
+            // 按需刷新：打印一次汇总（非交互模式）
+            if !interactive {
+                fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
+            }
+        case "search":
+            if len(parts) < 3 {
+                fmt.Println("Usage: search <album|song|artist> <keywords>")
+                continue
+            }
+            st := parts[1]
+            kw := parts[2:]
+            selectedUrl, err := handleSearch(st, kw, token)
+            if err != nil {
+                fmt.Println("Search error:", err)
+                continue
+            }
+            if selectedUrl == "" {
+                fmt.Println("No selection.")
+                continue
+            }
+            clearIssues()
+            handleSingleURL(selectedUrl, token)
+            // 任务完成后显示详细的 warning/error 信息，并询问是否重试
+            printIssuesSummary()
+            for counter.Error > 0 {
+                if !askYesNo("是否重试失败项? (y/N) ") {
+                    break
+                }
+                clearIssues()
+                retryOnly = true
+                handleSingleURL(selectedUrl, token)
+                retryOnly = false
+                printIssuesSummary()
+            }
+            clearFail()
+            // 按需刷新：打印一次汇总（非交互模式）
+            if !interactive {
+                fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
+            }
+		case "concurrency":
+			if len(parts) != 2 {
+				fmt.Println("Usage: concurrency <N>")
+				continue
+			}
+			n, err := strconv.Atoi(parts[1])
+			if err != nil || n <= 0 {
+				fmt.Println("Invalid N.")
+				continue
+			}
+			DownloadConcurrency = n
+			fmt.Printf("并发线程数设置为: %d\n", DownloadConcurrency)
+		case "flags":
+			fmt.Printf("atmos=%v aac=%v select=%v song=%v debug=%v concurrency=%d codec-priority=%v\n",
+				dl_atmos, dl_aac, dl_select, dl_song, debug_mode, DownloadConcurrency, currentCodecPriority())
+		case "codec-priority":
+			if len(parts) < 2 {
+				fmt.Println("Usage: codec-priority <codec1,codec2,...> | codec-priority show")
+				break
+			}
+			if parts[1] == "show" {
+				fmt.Printf("runtime=%v config=%v\n", RuntimeCodecPriority, Config.CodecPriority)
+				break
+			}
+			list := strings.Split(parts[1], ",")
+			out := make([]string, 0, len(list))
+			for _, c := range list {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					out = append(out, c)
+				}
+			}
+			RuntimeCodecPriority = out
+			fmt.Printf("运行时编码优先级设置为: %v\n", RuntimeCodecPriority)
+		default:
+			fmt.Println("未知命令，输入 'help' 获取帮助。")
+		}
+	}
+	stopProgress()
 }
