@@ -1,40 +1,40 @@
 package main
 
 import (
-    "bufio"
-    "bytes"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "log"
-    "net"
-    "net/http"
-    "net/url"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "regexp"
-    "sort"
-    "strconv"
-    "strings"
-    "sync"
-    "sync/atomic"
-    "time"
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
-    "main/utils/ampapi"
-    "main/utils/lyrics"
-    "main/utils/runv2"
-    "main/utils/runv3"
-    "main/utils/structs"
-    "main/utils/task"
+	"main/utils/ampapi"
+	"main/utils/lyrics"
+	"main/utils/runv2"
+	"main/utils/runv3"
+	"main/utils/structs"
+	"main/utils/task"
 
-    "github.com/AlecAivazis/survey/v2"
-    "github.com/fatih/color"
-    "github.com/grafov/m3u8"
-    "github.com/olekukonko/tablewriter"
-    "github.com/zhaarey/go-mp4tag"
-    "gopkg.in/yaml.v2"
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/fatih/color"
+	"github.com/grafov/m3u8"
+	"github.com/olekukonko/tablewriter"
+	"github.com/zhaarey/go-mp4tag"
+	"gopkg.in/yaml.v2"
 )
 
 var (
@@ -77,8 +77,8 @@ var (
 	failEntityMu sync.Mutex
 	failEntity   = make(map[string]struct{})
 	retryOnly    bool
-    // 真正的总数，用于状态栏显示
-    actualTotal int
+	// 真正的总数，用于状态栏显示
+	actualTotal int
 )
 
 func loadConfig() error {
@@ -189,20 +189,20 @@ func getFail(id string) []int {
 	return out
 }
 func clearFail() {
-    failMu.Lock()
-    failDict = make(map[string]map[int]struct{})
-    failMu.Unlock()
+	failMu.Lock()
+	failDict = make(map[string]map[int]struct{})
+	failMu.Unlock()
 }
 
 // 是否存在任何失败项（轨道或实体级）
 func hasAnyFail() bool {
-    failMu.Lock()
-    fd := len(failDict) > 0
-    failMu.Unlock()
-    failEntityMu.Lock()
-    ed := len(failEntity) > 0
-    failEntityMu.Unlock()
-    return fd || ed
+	failMu.Lock()
+	fd := len(failDict) > 0
+	failMu.Unlock()
+	failEntityMu.Lock()
+	ed := len(failEntity) > 0
+	failEntityMu.Unlock()
+	return fd || ed
 }
 
 // 实体级失败记录与查询
@@ -2268,17 +2268,17 @@ func writeMP4Tags(track *task.Track, lrc string) error {
 }
 
 func main() {
-    err := loadConfig()
-    if err != nil {
-        fmt.Printf("load Config failed: %v", err)
-        return
-    }
-    // 仅打印时分秒，不打印毫秒
-    log.SetFlags(log.LstdFlags &^ log.Lmicroseconds)
-    log.SetPrefix("[AMD] ")
+	err := loadConfig()
+	if err != nil {
+		fmt.Printf("load Config failed: %v", err)
+		return
+	}
+	// 仅打印时分秒，不打印毫秒
+	log.SetFlags(log.LstdFlags &^ log.Lmicroseconds)
+	log.SetPrefix("[AMD] ")
 
-    // 通过 Cobra 执行 CLI 子命令
-    Execute()
+	// 通过 Cobra 执行 CLI 子命令
+	Execute()
 }
 
 func mvDownloader(adamID string, saveDir string, token string, storefront string, mediaUserToken string, track *task.Track) error {
