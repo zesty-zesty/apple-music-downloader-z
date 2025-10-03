@@ -47,22 +47,27 @@ For `aac-lc`, MV and lyrics, you must configure a valid `media-user-token`.
 8. Inspect available quality:
    - `go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`
 
-## Usage (interactive)
-Start REPL:
-- `go run main.go --interactive`
-
+## Usage (CLI with Cobra)
 Commands:
-- `rip <url>`: download the given URL.
-- `search <album|song|artist> <keywords>`: fuzzy search and select, then download.
-- `concurrency <N>`: set download concurrency at runtime.
-- `codec-priority <list>` or `codec-priority show`: set or show codec priority (e.g. `alac,mp4a.40.2,ec-3`).
-- `flags`: show current download flags.
-- `exit`: quit interactive mode.
+- `amd rip <url...>`: 下载指定 URL (album|playlist|station|song)。支持多个 URL。
+- `amd search <album|song|artist> <keywords>`: 搜索并选择后下载。
+- `amd concurrency <N>`: 设置下载并发线程数。
+- `amd codec-priority show` 或 `amd codec-priority <alac,mp4a.40.2,ec-3>`: 显示或设置编码优先级。
+- `amd flags`: 显示当前下载相关标志与配置。
+
+Global flags (可与任意命令一起使用):
+- `--atmos`、`--aac`、`--select`、`--song`、`--all-album`、`--debug`
+- `--alac-max`、`--atmos-max`、`--aac-type`、`--mv-audio-type`、`--mv-max`、`--codec-priority`
+
+Examples:
+- `go run . rip https://music.apple.com/us/album/.../1624945511`
+- `go run . search album "1989 taylor"`
+- `go run . rip --atmos https://music.apple.com/us/album/...`
+- `go run . concurrency 8`
 
 Retry behavior:
-- After a job finishes, warnings/errors are summarized.
-- If failures exist, you will be asked whether to retry.
-- On subsequent failures, you will be asked again until there are no errors or you choose not to retry.
+- 任务结束后会输出告警/错误汇总。
+- 如存在失败项，会询问是否重试失败项。
 
 ## Configuration
 Copy `config-example.yaml` to `config.yaml` and edit:

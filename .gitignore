@@ -8,4 +8,11 @@
 !README.md
 !utils/*
 !config-example.yaml
+!cobra_codec_priority.go
+!cobra_concurrency.go
+!cobra_wizard_promptui.go
+!cobra_root.go
+!cobra_help.go
+!cobra_search.go
+!cobra_flag.go
 config.yaml
