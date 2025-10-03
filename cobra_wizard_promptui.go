@@ -38,7 +38,7 @@ func init() {
                     handleSingleURL(url, token)
                     printIssuesSummary()
 
-                    for counter.Error > 0 {
+                    for hasAnyFail() {
                         if !askYesNo("是否重试失败项? (y/N) ") {
                             break
                         }
@@ -49,6 +49,7 @@ func init() {
                         printIssuesSummary()
                     }
                     clearFail()
+                    clearEntityFail()
                     fmt.Printf("=======  [✔ ] Completed: %d/%d  |  [⚠ ] Warnings: %d  |  [✘ ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
 
                 case "search 搜索下载":
@@ -79,7 +80,7 @@ func init() {
                     handleSingleURL(selectedUrl, token)
                     printIssuesSummary()
 
-                    for counter.Error > 0 {
+                    for hasAnyFail() {
                         if !askYesNo("是否重试失败项? (y/N) ") {
                             break
                         }
@@ -90,6 +91,7 @@ func init() {
                         printIssuesSummary()
                     }
                     clearFail()
+                    clearEntityFail()
                     fmt.Printf("=======  [✔ ] Completed: %d/%d  |  [⚠ ] Warnings: %d  |  [✘ ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
 
                 case "设置":

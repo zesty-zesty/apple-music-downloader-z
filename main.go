@@ -189,9 +189,20 @@ func getFail(id string) []int {
 	return out
 }
 func clearFail() {
-	failMu.Lock()
-	failDict = make(map[string]map[int]struct{})
-	failMu.Unlock()
+    failMu.Lock()
+    failDict = make(map[string]map[int]struct{})
+    failMu.Unlock()
+}
+
+// 是否存在任何失败项（轨道或实体级）
+func hasAnyFail() bool {
+    failMu.Lock()
+    fd := len(failDict) > 0
+    failMu.Unlock()
+    failEntityMu.Lock()
+    ed := len(failEntity) > 0
+    failEntityMu.Unlock()
+    return fd || ed
 }
 
 // 实体级失败记录与查询
