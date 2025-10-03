@@ -15,7 +15,7 @@ A command-line tool to download songs, albums, playlists, and stations from Appl
 - Embed cover art and export/save LRC lyrics (requires `media-user-token`).
 - Support syllable/translation lyrics (beta), including pronunciation handling.
 - Download by URL: album, playlist, song, artist, station.
-- Interactive REPL with `search` and `rip` commands, plus runtime controls.
+- Interactive wizard with menu-driven `search`/`rip` and settings.
 - Decrypt while downloading to reduce memory usage with large files.
 - MV download and mux with `MP4Box` (audio+video).
 
@@ -88,8 +88,9 @@ Copy `config-example.yaml` to `config.yaml` and edit:
 6. Paste into `config.yaml`. If pronunciation is not needed, remove `%5D=<...>` from the value.
 
 ## Notes
-- Non-interactive mode prints a one-line summary. Interactive mode shows live progress without the summary line.
-- Status bar shows `Done/All` using the true total count.
+- Non-interactive mode prints a one-line summary.
+- Interactive wizard prints dynamic info (e.g., current values) only after choosing a menu item.
+- After each download, the wizard summarizes warnings/errors and can retry failed items.
 
 ## Thanks
 Special thanks to `chocomint` for creating `agent-arm64.js`.

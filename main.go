@@ -1,41 +1,40 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
+    "bufio"
+    "bytes"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "net/http"
+    "net/url"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "regexp"
+    "sort"
+    "strconv"
+    "strings"
+    "sync"
+    "sync/atomic"
+    "time"
 
-	"main/utils/ampapi"
-	"main/utils/lyrics"
-	"main/utils/runv2"
-	"main/utils/runv3"
-	"main/utils/structs"
-	"main/utils/task"
+    "main/utils/ampapi"
+    "main/utils/lyrics"
+    "main/utils/runv2"
+    "main/utils/runv3"
+    "main/utils/structs"
+    "main/utils/task"
 
-	"github.com/AlecAivazis/survey/v2"
-	"github.com/fatih/color"
-	"github.com/grafov/m3u8"
-	"github.com/olekukonko/tablewriter"
-	"github.com/zhaarey/go-mp4tag"
-	"golang.org/x/term"
-	"gopkg.in/yaml.v2"
+    "github.com/AlecAivazis/survey/v2"
+    "github.com/fatih/color"
+    "github.com/grafov/m3u8"
+    "github.com/olekukonko/tablewriter"
+    "github.com/zhaarey/go-mp4tag"
+    "gopkg.in/yaml.v2"
 )
 
 var (
@@ -78,10 +77,8 @@ var (
 	failEntityMu sync.Mutex
 	failEntity   = make(map[string]struct{})
 	retryOnly    bool
-	// 真正的总数，用于状态栏显示
-	actualTotal int
-	// 交互模式标志
-	interactive bool
+    // 真正的总数，用于状态栏显示
+    actualTotal int
 )
 
 func loadConfig() error {
@@ -249,54 +246,7 @@ func signalProgress() {
 	}
 }
 
-// --- 终端屏幕控制辅助 ---
-func termSize() (rows, cols int) {
-	fd := int(os.Stdout.Fd())
-	w, h, err := term.GetSize(fd)
-	if err != nil || h <= 0 || w <= 0 {
-		// 退化到常规单行刷新
-		return 0, 0
-	}
-	return h, w
-}
-
-func saveCursor()             { fmt.Print("\x1b[s") }
-func restoreCursor()          { fmt.Print("\x1b[u") }
-func moveCursor(row, col int) { fmt.Printf("\x1b[%d;%dH", row, col) }
-func clearLine()              { fmt.Print("\x1b[2K") }
-func clearScreen()            { fmt.Print("\x1b[2J\x1b[H") }
-
-// 设置滚动区域：保留底部最后一行为状态栏，避免日志将其顶上去
-func setScrollRegion(top, bottom int) { fmt.Printf("\x1b[%d;%dr", top, bottom) }
-
-// 将滚动区域恢复为整屏
-func resetScrollRegion() { fmt.Print("\x1b[r") }
-
-func renderBottom(line string) {
-	rows, cols := termSize()
-	if rows <= 0 || cols <= 0 {
-		// 非 TTY 或无法获取尺寸：运行期不刷新，由调用方在任务结束时打印一次汇总
-		return
-	}
-	// 保持当前光标位置
-	saveCursor()
-	// 移动到最底行，清行后输出
-	moveCursor(rows, 1)
-	clearLine()
-	// 适配宽度：截断或右侧填充
-	if len([]rune(line)) > cols {
-		r := []rune(line)
-		line = string(r[:cols])
-	} else {
-		line = fmt.Sprintf("%-*s", cols, line)
-	}
-	// 灰色背景（明黑背景 100），避免影响其他行，结束后立刻重置样式
-	fmt.Print("\x1b[100m")
-	fmt.Print(line)
-	fmt.Print("\x1b[0m")
-	// 恢复光标位置
-	restoreCursor()
-}
+// （已移除）REPL 模式相关的终端控制函数
 
 // 问题记录与打印
 func addWarning(msg string) {
@@ -349,57 +299,7 @@ func askYesNo(prompt string) bool {
 }
 
 // 进度渲染：事件驱动的底部刷新
-func startProgressRenderer() func() {
-	stop := make(chan struct{})
-	if progressCh == nil {
-		progressCh = make(chan struct{}, 32)
-	}
-	go func() {
-		// 设置滚动区域：锁定最后一行为状态栏
-		rows, _ := termSize()
-		if rows > 1 {
-			setScrollRegion(1, rows-1)
-		}
-		// 初始渲染：进入交互模式即在底部常驻显示一次状态栏
-		statsMu.Lock()
-		c := counter
-		statsMu.Unlock()
-		warnings := c.Unavailable + c.NotSong
-		active := atomic.LoadInt32(&activeDownloads)
-		line := fmt.Sprintf("[AMD] Active:%d  Done/All:%d/%d  Warnings:%d  Errors:%d",
-			active, c.Success, c.Total, warnings, c.Error)
-		renderBottom(line)
-		for {
-			select {
-			case <-progressCh:
-				// 快照读取计数，避免竞争
-				statsMu.Lock()
-				c := counter
-				statsMu.Unlock()
-				warnings := c.Unavailable + c.NotSong
-				active := atomic.LoadInt32(&activeDownloads)
-				line := fmt.Sprintf("[AMD] Active:%d  Done/All:%d/%d  Warnings:%d  Errors:%d",
-					active, c.Success, c.Total, warnings, c.Error)
-				renderBottom(line)
-			case <-stop:
-				// 清理底部行
-				rows, _ := termSize()
-				if rows > 0 {
-					saveCursor()
-					moveCursor(rows, 1)
-					clearLine()
-					restoreCursor()
-					// 恢复滚动区域为整屏
-					resetScrollRegion()
-				} else {
-					fmt.Print("\r")
-				}
-				return
-			}
-		}
-	}()
-	return func() { close(stop) }
-}
+// （已移除）REPL 模式进度渲染器
 
 func LimitString(s string) string {
 	if len([]rune(s)) > Config.LimitMax {
@@ -3010,151 +2910,4 @@ func handleSingleURL(urlRaw string, token string) {
 	fmt.Println("Invalid type")
 }
 
-// 交互式 REPL：支持 help、exit、rip <url>、search、concurrency
-func runInteractive(token string) {
-	stopProgress := startProgressRenderer()
-	defer stopProgress()
-	// 进入交互时清屏，腾出整个终端区域
-	clearScreen()
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		// 清屏并将提示符定位到倒数第二行
-		rows, _ := termSize()
-		if rows > 1 {
-			moveCursor(rows-1, 1)
-			clearLine()
-			fmt.Print("> ")
-		} else {
-			// 退化：无法获取终端尺寸
-			fmt.Print("\n> ")
-		}
-		// 标记输入期
-		atomic.StoreInt32(&inputActive, 1)
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				fmt.Println("EOF. Exiting.")
-				return
-			}
-			fmt.Println("Read error:", err)
-			atomic.StoreInt32(&inputActive, 0)
-			continue
-		}
-		atomic.StoreInt32(&inputActive, 0)
-		cmd := strings.TrimSpace(line)
-		if cmd == "" {
-			continue
-		}
-		parts := strings.Fields(cmd)
-		switch parts[0] {
-		case "exit", "quit":
-			fmt.Println("Bye.")
-			return
-		case "help":
-			fmt.Println("Commands:")
-			fmt.Println("  rip <url>            下载指定 URL (album|playlist|station|song)")
-			fmt.Println("  search <type> <kw>   搜索 album|song|artist 并选择")
-			fmt.Println("  concurrency <N>      设置下载并发线程数")
-			fmt.Println("  codec-priority <list> 设置编码优先级，逗号分隔，如: alac,mp4a.40.2,ec-3")
-			fmt.Println("  codec-priority show  显示当前运行时与配置的编码优先级")
-			fmt.Println("  flags                显示当前下载相关标志")
-			fmt.Println("  exit                 退出")
-		case "rip":
-			if len(parts) < 2 {
-				fmt.Println("Usage: rip <url>")
-				continue
-			}
-			clearIssues()
-			handleSingleURL(parts[1], token)
-			// 任务完成后显示详细的 warning/error 信息，并询问是否重试
-			printIssuesSummary()
-			for counter.Error > 0 {
-				if !askYesNo("是否重试失败项? (y/N) ") {
-					break
-				}
-				clearIssues()
-				retryOnly = true
-				handleSingleURL(parts[1], token)
-				retryOnly = false
-				printIssuesSummary()
-			}
-			clearFail()
-			// 按需刷新：打印一次汇总（非交互模式）
-			if !interactive {
-				fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
-			}
-		case "search":
-			if len(parts) < 3 {
-				fmt.Println("Usage: search <album|song|artist> <keywords>")
-				continue
-			}
-			st := parts[1]
-			kw := parts[2:]
-			selectedUrl, err := handleSearch(st, kw, token)
-			if err != nil {
-				fmt.Println("Search error:", err)
-				continue
-			}
-			if selectedUrl == "" {
-				fmt.Println("No selection.")
-				continue
-			}
-			clearIssues()
-			handleSingleURL(selectedUrl, token)
-			// 任务完成后显示详细的 warning/error 信息，并询问是否重试
-			printIssuesSummary()
-			for counter.Error > 0 {
-				if !askYesNo("是否重试失败项? (y/N) ") {
-					break
-				}
-				clearIssues()
-				retryOnly = true
-				handleSingleURL(selectedUrl, token)
-				retryOnly = false
-				printIssuesSummary()
-			}
-			clearFail()
-			// 按需刷新：打印一次汇总（非交互模式）
-			if !interactive {
-				fmt.Printf("=======  [\u2714 ] Completed: %d/%d  |  [\u26A0 ] Warnings: %d  |  [\u2716 ] Errors: %d  =======\n", counter.Success, counter.Total, counter.Unavailable+counter.NotSong, counter.Error)
-			}
-		case "concurrency":
-			if len(parts) != 2 {
-				fmt.Println("Usage: concurrency <N>")
-				continue
-			}
-			n, err := strconv.Atoi(parts[1])
-			if err != nil || n <= 0 {
-				fmt.Println("Invalid N.")
-				continue
-			}
-			DownloadConcurrency = n
-			fmt.Printf("并发线程数设置为: %d\n", DownloadConcurrency)
-		case "flags":
-			fmt.Printf("atmos=%v aac=%v select=%v song=%v debug=%v concurrency=%d codec-priority=%v\n",
-				dl_atmos, dl_aac, dl_select, dl_song, debug_mode, DownloadConcurrency, currentCodecPriority())
-		case "codec-priority":
-			if len(parts) < 2 {
-				fmt.Println("Usage: codec-priority <codec1,codec2,...> | codec-priority show")
-				break
-			}
-			if parts[1] == "show" {
-				fmt.Printf("runtime=%v config=%v\n", RuntimeCodecPriority, Config.CodecPriority)
-				break
-			}
-			list := strings.Split(parts[1], ",")
-			out := make([]string, 0, len(list))
-			for _, c := range list {
-				c = strings.TrimSpace(c)
-				if c != "" {
-					out = append(out, c)
-				}
-			}
-			RuntimeCodecPriority = out
-			fmt.Printf("运行时编码优先级设置为: %v\n", RuntimeCodecPriority)
-		default:
-			fmt.Println("未知命令，输入 'help' 获取帮助。")
-		}
-	}
-	stopProgress()
-}
+// （已移除）REPL 命令循环
