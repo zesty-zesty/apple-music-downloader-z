@@ -37,6 +37,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -58,7 +62,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          OUT="dist/amd-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          OUT="dist/amd-${GOOS}-${GOARCH}-${{ steps.vars.outputs.sha_short }}${{ matrix.ext }}"
           go build -pgo=auto -ldflags "-s -w" -o "$OUT" .
           test -f "$OUT"
 
@@ -66,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: amd-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/amd-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          path: dist/amd-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.vars.outputs.sha_short }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:
@@ -95,11 +99,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/amd-darwin-arm64
-            dist/amd-windows-amd64.exe
-            dist/amd-windows-arm64.exe
-            dist/amd-linux-amd64
-            dist/amd-linux-arm64
+            dist/amd-*
             dist/checksums.txt
           draft: false
           prerelease: false
