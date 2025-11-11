@@ -29,6 +29,7 @@ require (
 	github.com/stretchr/testify v1.10.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/term v0.28.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
@@ -44,6 +45,5 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/spf13/cobra v1.8.1
 	github.com/zhaarey/go-mp4tag v0.0.0-20250210094042-22578afc09bf
-	golang.org/x/term v0.28.0
 	gopkg.in/yaml.v2 v2.2.8
 )
