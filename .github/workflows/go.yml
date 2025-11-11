@@ -1,84 +1,107 @@
-name: Go
+name: Build and Release PGO Binaries
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.23.1'
-    - name: Build
-      run: |
-        go build -o main.exe -v ./main.go
-    - name: Create a new directory and copy files
-      run: |
-        mkdir -p alac
-        cp agent.js alac/
-        cp agent-arm64.js alac/
-        cp config.yaml alac/
-        cp README.md alac/
-        cp main.exe alac/
-    - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
-      with:
-        name: apple-music-alac-atmos-downloader-windows
-        path: alac/*
-
-  build-linux:
+  build:
     runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.23.1'
-    - name: Build
-      run: |
-        go build -o main -v ./main.go
-    - name: Create a new directory and copy files
-      run: |
-        mkdir -p alac
-        cp agent.js alac/
-        cp agent-arm64.js alac/
-        cp config.yaml alac/
-        cp README.md alac/
-        cp main alac/
-    - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
-      with:
-        name: apple-music-alac-atmos-downloader-linux
-        path: alac/*
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: windows
+            goarch: arm64
+            ext: .exe
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
 
-  build-macos:
-    runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.23.1'
-    - name: Build
-      run: |
-        go build -o main -v ./main.go
-    - name: Create a new directory and copy files
-      run: |
-        mkdir -p alac
-        cp agent.js alac/
-        cp agent-arm64.js alac/
-        cp config.yaml alac/
-        cp README.md alac/
-        cp main alac/
-    - name: Upload apple-music-alac-atmos-downloader
-      uses: actions/upload-artifact@v4
-      with:
-        name: apple-music-alac-atmos-downloader-macos
-        path: alac/*
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Check default.pgo presence
+        run: |
+          if [ -f default.pgo ]; then
+            echo "default.pgo found. PGO will be applied (auto)."
+          else
+            echo "WARNING: default.pgo missing. Build will succeed but without PGO optimizations."
+          fi
+
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }}) with PGO auto
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          OUT="dist/amd-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          go build -pgo=auto -ldflags "-s -w" -o "$OUT" .
+          test -f "$OUT"
+
+      - name: Upload artifact (${{ matrix.goos }}/${{ matrix.goarch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: amd-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/amd-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          ls -la
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/amd-darwin-arm64
+            dist/amd-windows-amd64.exe
+            dist/amd-windows-arm64.exe
+            dist/amd-linux-amd64
+            dist/amd-linux-arm64
+            dist/checksums.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
