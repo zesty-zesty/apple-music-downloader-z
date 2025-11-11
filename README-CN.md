@@ -21,7 +21,7 @@
 ## 命令行（非交互）
 1. 构建项目：
    - `go build .`
-2. 启动解密助手：[wrapper](https://github.com/WorldObservationLog/wrapper)。
+2. 启动解密助手：[wrapper-z](https://github.com/zesty-zesty/wrapper-z)。
 3. 运行项目：
    - `./main`（Windows:`./main.exe`）
 4. 下载单曲/专辑/播放列表：
@@ -37,7 +37,7 @@
 ## 交互式（Cobra CLI + Wizard）
 1. 构建项目：
    - `go build .`
-2. 启动解密助手：[wrapper](https://github.com/WorldObservationLog/wrapper)。
+2. 启动解密助手：[wrapper-z](https://github.com/zesty-zesty/wrapper-z)。
 3. 运行项目，以交互式模式运行：
    - `./main wizard`（Windows:`./main.exe wizard`）
 

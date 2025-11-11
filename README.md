@@ -23,7 +23,7 @@ A Go-based Apple Music downloader that can fetch songs, albums, playlists, and M
 ## Command-line (non-interactive)
 1. Build the project:
    - `go build .`
-2. Start the decryption helper: [wrapper](https://github.com/WorldObservationLog/wrapper).
+2. Start the decryption helper: [wrapper-z](https://github.com/zesty-zesty/wrapper-z).
 3. Run the program:
    - `./main` (Windows: `./main.exe`)
 4. Download a single song/album/playlist:
@@ -39,7 +39,7 @@ A Go-based Apple Music downloader that can fetch songs, albums, playlists, and M
 ## Interactive (Cobra CLI + Wizard)
 1. Build the project:
    - `go build .`
-2. Start the decryption helper: [wrapper](https://github.com/WorldObservationLog/wrapper).
+2. Start the decryption helper: [wrapper-z](https://github.com/zesty-zesty/wrapper-z).
 3. Run the program in interactive mode:
    - `./main wizard` (Windows: `./main.exe wizard`)
 
