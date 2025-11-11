@@ -85,6 +85,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Determine release tag (short SHA)
+        id: reltag
+        run: |
+          echo "tag=$(git rev-parse --short $GITHUB_SHA)" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.reltag.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch --tags --depth=1
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists."
+          else
+            git config user.name "${GITHUB_ACTOR}"
+            git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+            # Tag the current commit and push to origin using token
+            git tag "$TAG" "$GITHUB_SHA"
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$TAG"
+          fi
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -100,6 +122,7 @@ jobs:
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.reltag.outputs.tag }}
           files: |
             dist/amd-*
             dist/checksums.txt
