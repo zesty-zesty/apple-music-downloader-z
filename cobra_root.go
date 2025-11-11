@@ -2,6 +2,8 @@ package main
 
 import (
     "fmt"
+    "os"
+    "runtime/pprof"
     "strings"
 
     "github.com/spf13/cobra"
@@ -73,6 +75,23 @@ var (
                 Config.CodecPriority = out
             }
 
+            // 启用 CPU Profiling（用于 PGO）
+            if cmd.Flags().Changed("profile-cpu") {
+                cpuProfilePath, _ = cmd.Flags().GetString("profile-cpu")
+                if cpuProfilePath != "" && !cpuProfileActive {
+                    f, err := os.Create(cpuProfilePath)
+                    if err != nil {
+                        return fmt.Errorf("failed to create profile file %s: %w", cpuProfilePath, err)
+                    }
+                    if err := pprof.StartCPUProfile(f); err != nil {
+                        _ = f.Close()
+                        return fmt.Errorf("failed to start CPU profile: %w", err)
+                    }
+                    cpuProfileFile = f
+                    cpuProfileActive = true
+                }
+            }
+
             // 获取 token
             var err error
             cliToken, err = ampapi.GetToken()
@@ -84,6 +103,16 @@ var (
                 }
             }
             return nil
+        },
+        PersistentPostRun: func(cmd *cobra.Command, args []string) {
+            // 结束 CPU Profiling
+            if cpuProfileActive {
+                pprof.StopCPUProfile()
+                if cpuProfileFile != nil {
+                    _ = cpuProfileFile.Close()
+                }
+                cpuProfileActive = false
+            }
         },
     }
     cliToken string
@@ -103,6 +132,7 @@ func init() {
     rootCmd.PersistentFlags().StringVar(&Config.MVAudioType, "mv-audio-type", Config.MVAudioType, "Select MV audio type, atmos ac3 aac")
     rootCmd.PersistentFlags().IntVar(&Config.MVMax, "mv-max", Config.MVMax, "Specify the max quality for download MV")
     rootCmd.PersistentFlags().String("codec-priority", strings.Join(Config.CodecPriority, ","), "Specify codec priority, comma separated")
+    rootCmd.PersistentFlags().StringVar(&cpuProfilePath, "profile-cpu", "", "生成 CPU Profile（pprof），用于 PGO，例如 default.pgo")
 
     // 绑定 aac_type 指针到配置，避免 setDlFlags() 写入空指针
     aac_type = &Config.AacType

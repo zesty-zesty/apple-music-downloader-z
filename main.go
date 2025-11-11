@@ -84,6 +84,11 @@ var (
 	// New globals for concurrency and HTTP
 	httpClient  *http.Client
 	downloadSem chan struct{}
+
+	// CPU profiling (PGO)
+	cpuProfilePath   string
+	cpuProfileActive bool
+	cpuProfileFile   *os.File
 )
 
 func main() {
