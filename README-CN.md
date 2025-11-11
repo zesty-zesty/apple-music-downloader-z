@@ -7,7 +7,7 @@
   - `MP4Box`（用于标签与 MV 混流）：https://gpac.io/downloads/gpac-nightly-builds/
   - `mp4decrypt`（MV 解密必需）：https://www.bento4.com/downloads/
   - `ffmpeg`（可选，用于动图封面与下载后转换）
-- 在下载前确保解密助手 [wrapper](https://github.com/WorldObservationLog/wrapper) 已启动。
+- 在下载前确保解密助手 [wrapper-z](https://github.com/zesty-zesty/wrapper-z) 已启动。
 - 需要 Go `1.23+` 进行构建与运行。
 
 ## 功能

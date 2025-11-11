@@ -9,7 +9,7 @@ A Go-based Apple Music downloader that can fetch songs, albums, playlists, and M
   - `MP4Box` (for tagging and MV muxing): https://gpac.io/downloads/gpac-nightly-builds/
   - `mp4decrypt` (required for MV decryption): https://www.bento4.com/downloads/
   - `ffmpeg` (optional, for animated artwork and post-download conversion)
-- Ensure the decryption helper [wrapper](https://github.com/WorldObservationLog/wrapper) is running before downloads.
+- Ensure the decryption helper [wrapper-z](https://github.com/zesty-zesty/wrapper-z) is running before downloads.
 - Go `1.23+` is required to build and run.
 
 ## Features
