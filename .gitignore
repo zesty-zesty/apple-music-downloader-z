@@ -15,4 +15,5 @@
 !cobra_help.go
 !cobra_search.go
 !cobra_flag.go
+!.github/workflows/build-pgo.yml
 config.yaml
