@@ -16,3 +16,6 @@
 !cobra_search.go
 !cobra_flag.go
 config.yaml
+!.github/
+!.github/workflows/
+!.github/workflows/go.yml

@@ -44,17 +44,29 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.x'
-          # 关闭内置模块缓存，避免某些 runner 上 tar 解压失败（exit code 2）
+          go-version: '1.23.x'
           cache: false
 
-      - name: Check default.pgo presence
+      - name: Prepare config.yaml for profiling
         run: |
-          if [ -f default.pgo ]; then
-            echo "default.pgo found. PGO will be applied (auto)."
-          else
-            echo "WARNING: default.pgo missing. Build will succeed but without PGO optimizations."
-          fi
+          cat > config.yaml <<'EOF'
+          authorization-token: "dummy"
+          media-user-token: ""
+          language: "en"
+          output-folder: ./output
+          download-concurrency: 1
+          aac-type: aac
+          alac-max: 48000
+          atmos-max: 2448
+          limit-max: 200
+          codec-priority:
+            - aac
+          EOF
+
+      - name: Generate default.pgo profile
+        run: |
+          go run . --profile-cpu default.pgo codec-priority show || true
+          test -f default.pgo
 
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }}) with PGO auto
         env:
@@ -63,15 +75,15 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          OUT="dist/amd-${GOOS}-${GOARCH}-${{ steps.vars.outputs.sha_short }}${{ matrix.ext }}"
+          OUT="dist/AMD-z_${{ steps.vars.outputs.sha_short }}_${GOOS}_${GOARCH}${{ matrix.ext }}"
           go build -pgo=auto -ldflags "-s -w" -o "$OUT" .
           test -f "$OUT"
 
       - name: Upload artifact (${{ matrix.goos }}/${{ matrix.goarch }})
         uses: actions/upload-artifact@v4
         with:
-          name: amd-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/amd-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.vars.outputs.sha_short }}${{ matrix.ext }}
+          name: AMD-z_${{ steps.vars.outputs.sha_short }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/AMD-z_${{ steps.vars.outputs.sha_short }}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:
@@ -116,7 +128,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum * > checksums.txt
+          sha256sum AMD-z_* > checksums.txt
           ls -la
 
       - name: Create GitHub Release and upload assets
@@ -124,7 +136,7 @@ jobs:
         with:
           tag_name: ${{ steps.reltag.outputs.tag }}
           files: |
-            dist/amd-*
+            dist/AMD-z_*
             dist/checksums.txt
           draft: false
           prerelease: false
