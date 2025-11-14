@@ -385,20 +385,20 @@ func signalProgress() {
 
 // 问题记录与打印
 func addWarning(msg string) {
-    issueMu.Lock()
-    warningMessages = append(warningMessages, msg)
-    issueMu.Unlock()
-    if Logger != nil {
-        Logger.Warn(msg)
-    }
+	issueMu.Lock()
+	warningMessages = append(warningMessages, msg)
+	issueMu.Unlock()
+	if Logger != nil {
+		Logger.Warn(msg)
+	}
 }
 func addError(msg string) {
-    issueMu.Lock()
-    errorMessages = append(errorMessages, msg)
-    issueMu.Unlock()
-    if Logger != nil {
-        Logger.Error(msg)
-    }
+	issueMu.Lock()
+	errorMessages = append(errorMessages, msg)
+	issueMu.Unlock()
+	if Logger != nil {
+		Logger.Error(msg)
+	}
 }
 func clearIssues() {
 	issueMu.Lock()
