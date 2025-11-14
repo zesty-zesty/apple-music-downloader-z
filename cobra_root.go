@@ -5,6 +5,7 @@ import (
     "os"
     "runtime/pprof"
     "strings"
+    "log/slog"
 
     "github.com/spf13/cobra"
     "main/utils/ampapi"
@@ -40,6 +41,32 @@ var (
             if cmd.Flags().Changed("debug") {
                 v, _ := cmd.Flags().GetBool("debug")
                 debug_mode = v
+            }
+
+            // 初始化日志
+            var logLevel, logFormat, logFile string
+            var noColor bool
+            if f := cmd.Flags().Lookup("log-level"); f != nil {
+                logLevel, _ = cmd.Flags().GetString("log-level")
+            }
+            if f := cmd.Flags().Lookup("log-format"); f != nil {
+                logFormat, _ = cmd.Flags().GetString("log-format")
+            }
+            if f := cmd.Flags().Lookup("log-file"); f != nil {
+                logFile, _ = cmd.Flags().GetString("log-file")
+            }
+            if f := cmd.Flags().Lookup("no-color"); f != nil {
+                noColor, _ = cmd.Flags().GetBool("no-color")
+            }
+
+            // 如果开启 debug，则提升到 debug 日志级别
+            if debug_mode && (logLevel == "" || logLevel == "info") {
+                logLevel = "debug"
+            }
+
+            Logger = SetupLogger(logLevel, logFormat, logFile, noColor)
+            if Logger != nil {
+                Logger.Info("logger initialized", slog.String("level", logLevel), slog.String("format", logFormat), slog.String("file", logFile))
             }
 
             if cmd.Flags().Changed("alac-max") {
@@ -126,6 +153,11 @@ func init() {
     rootCmd.PersistentFlags().BoolVar(&dl_song, "song", false, "Enable single song download mode")
     rootCmd.PersistentFlags().BoolVar(&artist_select, "all-album", false, "Download all artist albums")
     rootCmd.PersistentFlags().BoolVar(&debug_mode, "debug", false, "Enable debug mode to show audio quality information")
+    // 日志控制
+    rootCmd.PersistentFlags().String("log-level", "info", "Log level: debug, info, warn, error")
+    rootCmd.PersistentFlags().String("log-format", "text", "Log format: text, json, auto")
+    rootCmd.PersistentFlags().String("log-file", "", "Log file path (enable file logging)")
+    rootCmd.PersistentFlags().Bool("no-color", false, "Disable color in console output")
     rootCmd.PersistentFlags().IntVar(&Config.AlacMax, "alac-max", Config.AlacMax, "Specify the max quality for download alac")
     rootCmd.PersistentFlags().IntVar(&Config.AtmosMax, "atmos-max", Config.AtmosMax, "Specify the max quality for download atmos")
     rootCmd.PersistentFlags().StringVar(&Config.AacType, "aac-type", Config.AacType, "Select AAC type, aac aac-binaural aac-downmix aac-lc")
@@ -141,6 +173,10 @@ func init() {
 // Execute 作为 Cobra 入口
 func Execute() {
     if err := rootCmd.Execute(); err != nil {
-        fmt.Println(err)
+        if Logger != nil {
+            Logger.Error("command execution failed", slog.Any("error", err))
+        } else {
+            fmt.Println(err)
+        }
     }
 }
