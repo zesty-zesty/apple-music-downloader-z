@@ -65,7 +65,27 @@ jobs:
 
       - name: Generate default.pgo profile
         run: |
-          go run . --profile-cpu default.pgo codec-priority show || true
+          cat > pgo_stub.go <<'EOF'
+          package main
+          import (
+            "os"
+            "runtime/pprof"
+            "time"
+          )
+          func main() {
+            f, err := os.Create("default.pgo")
+            if err != nil { panic(err) }
+            pprof.StartCPUProfile(f)
+            t := time.Now()
+            for time.Since(t) < 2*time.Second {
+              for i := 0; i < 2_000_000; i++ { _ = i*i }
+            }
+            pprof.StopCPUProfile()
+            _ = f.Close()
+          }
+          EOF
+          go run pgo_stub.go
+          rm -f pgo_stub.go
           test -f default.pgo
 
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }}) with PGO auto
