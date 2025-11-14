@@ -1,4 +1,4 @@
-name: Build and Release PGO Binaries
+name: Build and Release Binaries
 
 on:
   push:
@@ -47,48 +47,7 @@ jobs:
           go-version: '1.23.x'
           cache: false
 
-      - name: Prepare config.yaml for profiling
-        run: |
-          cat > config.yaml <<'EOF'
-          authorization-token: "dummy"
-          media-user-token: ""
-          language: "en"
-          output-folder: ./output
-          download-concurrency: 1
-          aac-type: aac
-          alac-max: 48000
-          atmos-max: 2448
-          limit-max: 200
-          codec-priority:
-            - aac
-          EOF
-
-      - name: Generate default.pgo profile
-        run: |
-          cat > pgo_stub.go <<'EOF'
-          package main
-          import (
-            "os"
-            "runtime/pprof"
-            "time"
-          )
-          func main() {
-            f, err := os.Create("default.pgo")
-            if err != nil { panic(err) }
-            pprof.StartCPUProfile(f)
-            t := time.Now()
-            for time.Since(t) < 2*time.Second {
-              for i := 0; i < 2_000_000; i++ { _ = i*i }
-            }
-            pprof.StopCPUProfile()
-            _ = f.Close()
-          }
-          EOF
-          go run pgo_stub.go
-          rm -f pgo_stub.go
-          test -f default.pgo
-
-      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }}) with PGO auto
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -96,7 +55,7 @@ jobs:
         run: |
           mkdir -p dist
           OUT="dist/AMD-z_${{ steps.vars.outputs.sha_short }}_${GOOS}_${GOARCH}${{ matrix.ext }}"
-          go build -pgo=auto -ldflags "-s -w" -o "$OUT" .
+          go build -ldflags "-s -w" -o "$OUT" .
           test -f "$OUT"
 
       - name: Upload artifact (${{ matrix.goos }}/${{ matrix.goarch }})
