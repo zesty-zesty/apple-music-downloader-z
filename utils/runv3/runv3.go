@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/itouakirai/mp4ff/mp4"
 
@@ -125,7 +126,8 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	req.Header.Set("x-apple-music-user-token", mutoken)
 	// 创建 HTTP 客户端
 	//client := &http.Client{}
-	resp, err := http.DefaultClient.Do(req)
+    client := &http.Client{Timeout: 30 * time.Second}
+    resp, err := client.Do(req)
 	// 发送请求
 	//resp, err := client.Do(req)
 	if err != nil {
@@ -172,7 +174,8 @@ type Songlist struct {
 }
 
 func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
-	resp, err := http.Get(b)
+    client := &http.Client{Timeout: 30 * time.Second}
+    resp, err := client.Get(b)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -180,12 +183,12 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", "", "", errors.New(resp.Status)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", "", err
-	}
-	masterString := string(body)
-	from, listType, err := m3u8.DecodeFrom(strings.NewReader(masterString), true)
+    var buf bytes.Buffer
+    _, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
+    if err != nil {
+        return "", "", "", err
+    }
+    from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -225,15 +228,20 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	}
 	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
-func extsong(b string) bytes.Buffer {
-	resp, err := http.Get(b)
-	if err != nil {
-		fmt.Printf("下载文件失败: %v\n", err)
-	}
-	defer resp.Body.Close()
-	var buffer bytes.Buffer
-	bar := progressbar.NewOptions64(
-		resp.ContentLength,
+func extsong(b string) (*os.File, int64, error) {
+    client := &http.Client{Timeout: 120 * time.Second}
+    resp, err := client.Get(b)
+    if err != nil {
+        fmt.Printf("下载文件失败: %v\n", err)
+        return nil, 0, err
+    }
+    defer resp.Body.Close()
+    tmp, err := os.CreateTemp("", "runv3-body-*.mp4")
+    if err != nil {
+        return nil, 0, err
+    }
+    bar := progressbar.NewOptions64(
+        resp.ContentLength,
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionSetElapsedTime(false),
 		progressbar.OptionSetPredictTime(false),
@@ -250,8 +258,18 @@ func extsong(b string) bytes.Buffer {
 			BarEnd:        "",
 		}),
 	)
-	io.Copy(io.MultiWriter(&buffer, bar), resp.Body)
-	return buffer
+    _, err = io.Copy(io.MultiWriter(tmp, bar), resp.Body)
+    if err != nil {
+        tmp.Close()
+        os.Remove(tmp.Name())
+        return nil, 0, err
+    }
+    if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+        tmp.Close()
+        os.Remove(tmp.Name())
+        return nil, 0, err
+    }
+    return tmp, resp.ContentLength, nil
 }
 func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmode bool, serverUrl string) (string, error) {
 	var keystr string //for mv key
@@ -310,32 +328,31 @@ func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmo
 		keyAndUrls := "1:" + keystr + ";" + fileurl
 		return keyAndUrls, nil
 	}
-	body := extsong(fileurl)
-	fmt.Print("Downloaded\n")
-	//bodyReader := bytes.NewReader(body)
-	var buffer bytes.Buffer
-
-	err = DecryptMP4(&body, keybt, &buffer)
-	if err != nil {
-		fmt.Print("Decryption failed\n")
-		return "", err
-	} else {
-		fmt.Print("Decrypted\n")
-	}
-	// create output file
-	ofh, err := os.Create(trackpath)
-	if err != nil {
-		fmt.Printf("创建文件失败: %v\n", err)
-		return "", err
-	}
-	defer ofh.Close()
-
-	_, err = ofh.Write(buffer.Bytes())
-	if err != nil {
-		fmt.Printf("写入文件失败: %v\n", err)
-		return "", err
-	}
-	return "", nil
+    bodyFile, _, err := extsong(fileurl)
+    if err != nil {
+        return "", err
+    }
+    fmt.Print("Downloaded\n")
+    ofh, err := os.Create(trackpath)
+    if err != nil {
+        bodyFile.Close()
+        os.Remove(bodyFile.Name())
+        return "", err
+    }
+    err = DecryptMP4(bodyFile, keybt, ofh)
+    if err != nil {
+        fmt.Print("Decryption failed\n")
+        ofh.Close()
+        bodyFile.Close()
+        os.Remove(bodyFile.Name())
+        return "", err
+    } else {
+        fmt.Print("Decrypted\n")
+    }
+    ofh.Close()
+    bodyFile.Close()
+    os.Remove(bodyFile.Name())
+    return "", nil
 }
 
 // Segment 结构体用于在 Channel 中传递分段数据
@@ -427,7 +444,7 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 	}
 }
 
-func ExtMvData(keyAndUrls string, savePath string) error {
+func ExtMvData(keyAndUrls string, savePath string, maxConcurrency int) error {
 	segments := strings.Split(keyAndUrls, ";")
 	key := segments[0]
 	//fmt.Println(key)
@@ -443,9 +460,10 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	var downloadWg, writerWg sync.WaitGroup
 	segmentsChan := make(chan Segment, len(urls))
 	// --- 新增代码: 定义最大并发数 ---
-	const maxConcurrency = 10
-	// --- 新增代码: 创建带缓冲的 Channel 作为信号量 ---
-	limiter := make(chan struct{}, maxConcurrency)
+    if maxConcurrency <= 0 {
+        maxConcurrency = 10
+    }
+    limiter := make(chan struct{}, maxConcurrency)
 	client := &http.Client{}
 
 	// 初始化进度条

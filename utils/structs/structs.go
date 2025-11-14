@@ -35,14 +35,18 @@ type ConfigSet struct {
 	DlAlbumcoverForPlaylist    bool     `yaml:"dl-albumcover-for-playlist"`
 	MVAudioType                string   `yaml:"mv-audio-type"`
 	MVMax                      int      `yaml:"mv-max"`
-	CodecPriority              []string `yaml:"codec-priority"`
-	ConvertAfterDownload       bool     `yaml:"convert-after-download"`
-	ConvertFormat              string   `yaml:"convert-format"`
-	ConvertKeepOriginal        bool     `yaml:"convert-keep-original"`
-	ConvertSkipIfSourceMatch   bool     `yaml:"convert-skip-if-source-matches"`
-	FFmpegPath                 string   `yaml:"ffmpeg-path"`
-	ConvertExtraArgs           string   `yaml:"convert-extra-args"`
-	ConvertWarnLossyToLossless bool     `yaml:"convert-warn-lossy-to-lossless"`
+    CodecPriority              []string `yaml:"codec-priority"`
+    ConvertAfterDownload       bool     `yaml:"convert-after-download"`
+    ConvertFormat              string   `yaml:"convert-format"`
+    ConvertKeepOriginal        bool     `yaml:"convert-keep-original"`
+    ConvertSkipIfSourceMatch   bool     `yaml:"convert-skip-if-source-matches"`
+    FFmpegPath                 string   `yaml:"ffmpeg-path"`
+    ConvertExtraArgs           string   `yaml:"convert-extra-args"`
+    ConvertWarnLossyToLossless bool     `yaml:"convert-warn-lossy-to-lossless"`
+    RequestTimeoutSec          int      `yaml:"request-timeout-sec"`
+    DownloadTimeoutSec         int      `yaml:"download-timeout-sec"`
+    MVSegmentConcurrency       int      `yaml:"mv-segment-concurrency"`
+    TaggingConcurrency         int      `yaml:"tagging-concurrency"`
 }
 
 type Counter struct {
