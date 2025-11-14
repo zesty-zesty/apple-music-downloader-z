@@ -45,11 +45,11 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 
 
 func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet) error {
-	var err error
-	var optstimeout uint
-	optstimeout = 0
-	timeout := time.Duration(optstimeout * uint(time.Millisecond))
-	header := make(http.Header)
+    var err error
+    var optstimeout uint
+    optstimeout = 120000
+    timeout := time.Duration(optstimeout * uint(time.Millisecond))
+    header := make(http.Header)
 
 	// request media playlist
 	req, err := http.NewRequest("GET", playlistUrl, nil)
@@ -58,10 +58,11 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	}
 	req.Header = header
 	// requesting an HLS playlist should be relatively fast, so we set the timeout directly on the client
-	do, err := (&http.Client{Timeout: timeout}).Do(req)
-	if err != nil {
-		return err
-	}
+    do, err := (&http.Client{Timeout: timeout}).Do(req)
+    if err != nil {
+        return err
+    }
+    defer do.Body.Close()
 
 	// parse m3u8
 	segments, err := parseMediaPlaylist(do.Body)
@@ -95,56 +96,56 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	}
 	req.Header = header
 
-	var body io.Reader
-	client := &http.Client{Timeout: timeout}
-	if optstimeout > 0 {
-		// create the timer before calling Do so that the timeout covers TCP handshake,
-		// TLS handshake, sending the request and receiving HTTP headers
-		timer := time.AfterFunc(timeout, func() { cancel(ErrTimeout) })
-		do, err = client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer do.Body.Close()
-		body = &TimedResponseBody{
-			timeout:   timeout,
-			timer:     timer,
-			threshold: 256,
-			body:      do.Body,
-		}
-	} else {
-		do, err = client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer do.Body.Close()
-		if do.ContentLength < int64(Config.MaxMemoryLimit * 1024 * 1024) {
-			var buffer bytes.Buffer
-			bar := progressbar.NewOptions64(
-				do.ContentLength,
-				progressbar.OptionClearOnFinish(),
-				progressbar.OptionSetElapsedTime(false),
-				progressbar.OptionSetPredictTime(false),
-				progressbar.OptionShowElapsedTimeOnFinish(),
-				progressbar.OptionShowCount(),
-				progressbar.OptionEnableColorCodes(true),
-				progressbar.OptionShowBytes(true),
-				progressbar.OptionSetDescription("Downloading..."),
-				progressbar.OptionSetTheme(progressbar.Theme{
-					Saucer:        "",
-					SaucerHead:    "",
-					SaucerPadding: "",
-					BarStart:      "",
-					BarEnd:        "",
-				}),
-			)
-			io.Copy(io.MultiWriter(&buffer, bar), do.Body)
-			body = &buffer
-			fmt.Print("Downloaded\n")
-		} else {
-			body = do.Body
-		}
-	}
+    var body io.Reader
+    client := &http.Client{Timeout: timeout}
+    if optstimeout > 0 {
+        // create the timer before calling Do so that the timeout covers TCP handshake,
+        // TLS handshake, sending the request and receiving HTTP headers
+        timer := time.AfterFunc(timeout, func() { cancel(ErrTimeout) })
+        do, err = client.Do(req)
+        if err != nil {
+            return err
+        }
+        defer do.Body.Close()
+        body = &TimedResponseBody{
+            timeout:   timeout,
+            timer:     timer,
+            threshold: 256,
+            body:      do.Body,
+        }
+    } else {
+        do, err = client.Do(req)
+        if err != nil {
+            return err
+        }
+        defer do.Body.Close()
+        if do.ContentLength < int64(Config.MaxMemoryLimit * 1024 * 1024) {
+            var buffer bytes.Buffer
+            bar := progressbar.NewOptions64(
+                do.ContentLength,
+                progressbar.OptionClearOnFinish(),
+                progressbar.OptionSetElapsedTime(false),
+                progressbar.OptionSetPredictTime(false),
+                progressbar.OptionShowElapsedTimeOnFinish(),
+                progressbar.OptionShowCount(),
+                progressbar.OptionEnableColorCodes(true),
+                progressbar.OptionShowBytes(true),
+                progressbar.OptionSetDescription("Downloading..."),
+                progressbar.OptionSetTheme(progressbar.Theme{
+                    Saucer:        "",
+                    SaucerHead:    "",
+                    SaucerPadding: "",
+                    BarStart:      "",
+                    BarEnd:        "",
+                }),
+            )
+            io.Copy(io.MultiWriter(&buffer, bar), do.Body)
+            body = &buffer
+            fmt.Print("Downloaded\n")
+        } else {
+            body = do.Body
+        }
+    }
 
 	var totalLen int64
 	totalLen = do.ContentLength

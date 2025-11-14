@@ -71,3 +71,4 @@ convert-keep-original: false       # Keep original file after successful convers
 convert-skip-if-source-matches: true  # If already in target format, skip
 ffmpeg-path: "ffmpeg"             # Override if ffmpeg is not in PATH
 convert-extra-args: ""            # Additional raw args appended (advanced)
+convert-warn-lossy-to-lossless: false # Warn if converting lossy source to lossless container

@@ -1,13 +1,14 @@
 package lyrics
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
-	"strings"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "net/http"
+    "strings"
+    "time"
 
-	"github.com/beevik/etree"
+    "github.com/beevik/etree"
 )
 
 type SongLyrics struct {
@@ -60,7 +61,7 @@ func getSongLyrics(songId string, storefront string, token string, userToken str
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	cookie := http.Cookie{Name: "media-user-token", Value: userToken}
 	req.AddCookie(&cookie)
-	do, err := http.DefaultClient.Do(req)
+    do, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
 		return "", err
 	}

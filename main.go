@@ -217,6 +217,16 @@ func loadConfig() error {
 	if len(Config.Storefront) != 2 {
 		Config.Storefront = "us"
 	}
+	// Default values for lyrics-related configuration to avoid missing keys blocking lyrics
+	if strings.TrimSpace(Config.Language) == "" {
+		Config.Language = "en"
+	}
+	if strings.TrimSpace(Config.LrcType) == "" {
+		Config.LrcType = "lyrics"
+	}
+	if strings.TrimSpace(Config.LrcFormat) == "" {
+		Config.LrcFormat = "lrc"
+	}
 	// 读取 output-folder（不修改外部 ConfigSet 结构）
 	var cfgOut struct {
 		OutputFolder string `yaml:"output-folder"`
@@ -1133,17 +1143,13 @@ func convertIfNeeded(track *task.Track) {
 }
 
 func ripTrack(track *task.Track, token string, mediaUserToken string) {
-	// Acquire global download slot to limit overall concurrency
-	acquireDownloadSlot()
-	defer releaseDownloadSlot()
-
-	var err error
-	atomic.AddInt32(&activeDownloads, 1)
-	signalProgress()
-	defer func() {
-		atomic.AddInt32(&activeDownloads, -1)
-		signalProgress()
-	}()
+    var err error
+    atomic.AddInt32(&activeDownloads, 1)
+    signalProgress()
+    defer func() {
+        atomic.AddInt32(&activeDownloads, -1)
+        signalProgress()
+    }()
 	incTotal()
 	fmt.Printf("Track %d of %d: %s\n", track.TaskNum, track.TaskTotal, track.Type)
 
@@ -1326,45 +1332,51 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		}
 	}
 
-	if needDlAacLc {
-		if len(mediaUserToken) <= 50 {
-			fmt.Println("Invalid media-user-token:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
-			incError()
-			addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: invalid media-user-token", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
-			return
-		}
-		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
-		if err != nil {
-			fmt.Println("Failed to dl aac-lc:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
-			if err.Error() == "Unavailable" {
-				incUnavailable()
-				addWarning("AAC-LC unavailable")
-				return
-			}
-			incError()
-			addFail(track.PreID, track.TaskNum)
-			addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
-			return
-		}
-	} else {
-		trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
-		if err != nil {
-			fmt.Println("\u26A0 Failed to extract info from manifest:", err)
-			incUnavailable()
-			addFail(track.PreID, track.TaskNum)
-			addWarning(fmt.Sprintf("Manifest extract failed: %v", err))
-			return
-		}
-		//边下载边解密
-		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
-		if err != nil {
-			fmt.Println("Failed to run v2:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
-			incError()
-			addFail(track.PreID, track.TaskNum)
-			addError(fmt.Sprintf("[%s - %s] HLS run failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
-			return
-		}
-	}
+    if needDlAacLc {
+        acquireDownloadSlot()
+        defer releaseDownloadSlot()
+        if len(mediaUserToken) <= 50 {
+            fmt.Println("Invalid media-user-token:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+            incError()
+            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: invalid media-user-token", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+            return
+        }
+        _, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
+        if err != nil {
+            fmt.Println("Failed to dl aac-lc:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+            if err.Error() == "Unavailable" {
+                incUnavailable()
+                addWarning("AAC-LC unavailable")
+                return
+            }
+            incError()
+            addFail(track.PreID, track.TaskNum)
+            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+            return
+        }
+        releaseDownloadSlot()
+    } else {
+        acquireDownloadSlot()
+        defer releaseDownloadSlot()
+        trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
+        if err != nil {
+            fmt.Println("\u26A0 Failed to extract info from manifest:", err)
+            incUnavailable()
+            addFail(track.PreID, track.TaskNum)
+            addWarning(fmt.Sprintf("Manifest extract failed: %v", err))
+            return
+        }
+        //边下载边解密
+        err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
+        if err != nil {
+            fmt.Println("Failed to run v2:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+            incError()
+            addFail(track.PreID, track.TaskNum)
+            addError(fmt.Sprintf("[%s - %s] HLS run failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+            return
+        }
+        releaseDownloadSlot()
+    }
 	tags := []string{
 		"tool=",
 		fmt.Sprintf("artist=%s", track.Resp.Attributes.ArtistName),
