@@ -46,12 +46,7 @@ var (
 	dl_song             bool
 	artist_select       bool
 	debug_mode          bool
-	alac_max            *int
-	atmos_max           *int
-	mv_max              *int
-	mv_audio_type       *string
 	aac_type            *string
-	codec_priority      *[]string
 	Config              structs.ConfigSet
 	counter             structs.Counter
 	okDict              = make(map[string][]int)
@@ -78,8 +73,6 @@ var (
 	failEntityMu sync.Mutex
 	failEntity   = make(map[string]struct{})
 	retryOnly    bool
-	// 真正的总数，用于状态栏显示
-	actualTotal int
 
 	// New globals for concurrency and HTTP
 	httpClient  *http.Client
@@ -289,12 +282,7 @@ func incUnavailable() {
 	statsMu.Unlock()
 	signalProgress()
 }
-func incNotSong() {
-	statsMu.Lock()
-	counter.NotSong++
-	statsMu.Unlock()
-	signalProgress()
-}
+
 func addOk(id string, num int) {
 	okMu.Lock()
 	okDict[id] = append(okDict[id], num)
@@ -366,12 +354,6 @@ func removeEntityFail(id string) {
 	failEntityMu.Lock()
 	delete(failEntity, id)
 	failEntityMu.Unlock()
-}
-func hasEntityFail(id string) bool {
-	failEntityMu.Lock()
-	_, ok := failEntity[id]
-	failEntityMu.Unlock()
-	return ok
 }
 func clearEntityFail() {
 	failEntityMu.Lock()
@@ -557,18 +539,7 @@ func checkUrlArtist(url string) (string, string) {
 		return matches[0][1], matches[0][2]
 	}
 }
-func getUrlSong(songUrl string, token string) (string, error) {
-	storefront, songId := checkUrlSong(songUrl)
-	manifest, err := ampapi.GetSongResp(storefront, songId, Config.Language, token)
-	if err != nil {
-		fmt.Println("\u26A0 Failed to get manifest:", err)
-		incNotSong()
-		return "", err
-	}
-	albumId := manifest.Data[0].Relationships.Albums.Data[0].ID
-	songAlbumUrl := fmt.Sprintf("https://music.apple.com/%s/album/1/%s?i=%s", storefront, albumId, songId)
-	return songAlbumUrl, nil
-}
+
 func getUrlArtistName(artistUrl string, token string) (string, string, error) {
 	storefront, artistId := checkUrlArtist(artistUrl)
 	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s", storefront, artistId), nil)
@@ -641,9 +612,10 @@ func checkArtist(artistUrl string, token string, relationship string) ([]string,
 	})
 
 	table := tablewriter.NewWriter(os.Stdout)
-	if relationship == "albums" {
+	switch relationship {
+	case "albums":
 		table.SetHeader([]string{"", "Album Name", "Date", "Album ID"})
-	} else if relationship == "music-videos" {
+	case "music-videos":
 		table.SetHeader([]string{"", "MV Name", "Date", "MV ID"})
 	}
 	table.SetRowLine(false)
@@ -1791,13 +1763,14 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 					if err != nil {
 						fmt.Println("Failed to extract quality from manifest.\n", err)
 					}
-					if codecs == "ec-3" || codecs == "ac-3" {
+					switch codecs {
+					case "ec-3", "ac-3":
 						localDlAtmos = true
 						localDlAac = false
-					} else if codecs == "mp4a.40.2" {
+					case "mp4a.40.2":
 						localDlAtmos = false
 						localDlAac = true
-					} else {
+					default:
 						localDlAtmos = false
 						localDlAac = false
 					}
@@ -1830,13 +1803,14 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 				var codecs string
 				_, _, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
 				if err == nil {
-					if codecs == "ec-3" || codecs == "ac-3" {
+					switch codecs {
+					case "ec-3", "ac-3":
 						localDlAtmos = true
 						localDlAac = false
-					} else if codecs == "mp4a.40.2" {
+					case "mp4a.40.2":
 						localDlAtmos = false
 						localDlAac = true
-					} else {
+					default:
 						localDlAtmos = false
 						localDlAac = false
 					}
@@ -2150,13 +2124,14 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 						fmt.Println("Failed to extract quality from manifest.\n", err)
 					}
 					// Resolve flags from selected codec (priority-driven)
-					if codecs == "ec-3" || codecs == "ac-3" {
+					switch codecs {
+					case "ec-3", "ac-3":
 						localDlAtmos = true
 						localDlAac = false
-					} else if codecs == "mp4a.40.2" {
+					case "mp4a.40.2":
 						localDlAtmos = false
 						localDlAac = true
-					} else {
+					default:
 						localDlAtmos = false
 						localDlAac = false
 					}
@@ -2189,13 +2164,14 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 				var codecs string
 				_, _, codecs, err = extractMedia(manifest1.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls, true)
 				if err == nil {
-					if codecs == "ec-3" || codecs == "ac-3" {
+					switch codecs {
+					case "ec-3", "ac-3":
 						localDlAtmos = true
 						localDlAac = false
-					} else if codecs == "mp4a.40.2" {
+					case "mp4a.40.2":
 						localDlAtmos = false
 						localDlAac = true
-					} else {
+					default:
 						localDlAtmos = false
 						localDlAac = false
 					}
@@ -2428,11 +2404,12 @@ func mvDownloader(adamID string, saveDir string, token string, storefront string
 		fmt.Sprintf("ISRC=%s", MVInfo.Data[0].Attributes.Isrc),
 	}
 
-	if MVInfo.Data[0].Attributes.ContentRating == "explicit" {
+	switch MVInfo.Data[0].Attributes.ContentRating {
+	case "explicit":
 		tags = append(tags, "rating=1")
-	} else if MVInfo.Data[0].Attributes.ContentRating == "clean" {
+	case "clean":
 		tags = append(tags, "rating=2")
-	} else {
+	default:
 		tags = append(tags, "rating=0")
 	}
 
@@ -2527,9 +2504,10 @@ func extractMvAudio(c string) (string, error) {
 	audio := from.(*m3u8.MasterPlaylist)
 
 	var audioPriority = []string{"audio-atmos", "audio-ac3", "audio-stereo-256"}
-	if Config.MVAudioType == "ac3" {
+	switch Config.MVAudioType {
+	case "ac3":
 		audioPriority = []string{"audio-ac3", "audio-stereo-256"}
-	} else if Config.MVAudioType == "aac" {
+	case "aac":
 		audioPriority = []string{"audio-stereo-256"}
 	}
 
@@ -3058,11 +3036,12 @@ func writeMP4Tags(track *task.Track, lrc string) error {
 		t.Publisher = track.AlbumData.Attributes.RecordLabel
 	}
 
-	if track.Resp.Attributes.ContentRating == "explicit" {
+	switch track.Resp.Attributes.ContentRating {
+	case "explicit":
 		t.ItunesAdvisory = mp4tag.ItunesAdvisoryExplicit
-	} else if track.Resp.Attributes.ContentRating == "clean" {
+	case "clean":
 		t.ItunesAdvisory = mp4tag.ItunesAdvisoryClean
-	} else {
+	default:
 		t.ItunesAdvisory = mp4tag.ItunesAdvisoryNone
 	}
 
