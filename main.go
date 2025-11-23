@@ -81,10 +81,10 @@ var (
 	// 真正的总数，用于状态栏显示
 	actualTotal int
 
-    // New globals for concurrency and HTTP
-    httpClient  *http.Client
-    downloadSem chan struct{}
-    tagSem      chan struct{}
+	// New globals for concurrency and HTTP
+	httpClient  *http.Client
+	downloadSem chan struct{}
+	tagSem      chan struct{}
 
 	// CPU profiling (PGO)
 	cpuProfilePath   string
@@ -137,34 +137,34 @@ func initGlobals() {
 	if DownloadConcurrency <= 0 {
 		DownloadConcurrency = 4
 	}
-    downloadSem = make(chan struct{}, DownloadConcurrency)
+	downloadSem = make(chan struct{}, DownloadConcurrency)
 	// progress channel
 	if progressCh == nil {
 		progressCh = make(chan struct{}, 1)
 	}
-    reqTimeout := 30 * time.Second
-    if Config.RequestTimeoutSec > 0 {
-        reqTimeout = time.Duration(Config.RequestTimeoutSec) * time.Second
-    }
-    httpClient = &http.Client{
-        Timeout: reqTimeout,
-        Transport: &http.Transport{
-            Proxy: http.ProxyFromEnvironment,
-            DialContext: (&net.Dialer{
-                Timeout:   reqTimeout,
-                KeepAlive: 30 * time.Second,
-            }).DialContext,
-            TLSHandshakeTimeout: 10 * time.Second,
-            MaxIdleConns:        100,
-            MaxIdleConnsPerHost: 20,
-            IdleConnTimeout:     60 * time.Second,
-        },
-    }
-    tagConc := 2
-    if Config.TaggingConcurrency > 0 {
-        tagConc = Config.TaggingConcurrency
-    }
-    tagSem = make(chan struct{}, tagConc)
+	reqTimeout := 30 * time.Second
+	if Config.RequestTimeoutSec > 0 {
+		reqTimeout = time.Duration(Config.RequestTimeoutSec) * time.Second
+	}
+	httpClient = &http.Client{
+		Timeout: reqTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   reqTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+	tagConc := 2
+	if Config.TaggingConcurrency > 0 {
+		tagConc = Config.TaggingConcurrency
+	}
+	tagSem = make(chan struct{}, tagConc)
 }
 
 // applyConfigToFlags sets cobra persistent flag values based on loaded Config.
@@ -199,14 +199,19 @@ func acquireDownloadSlot() {
 
 // releaseDownloadSlot releases a previously acquired slot
 func releaseDownloadSlot() {
-    select {
-    case <-downloadSem:
-    default:
-    }
+	select {
+	case <-downloadSem:
+	default:
+	}
 }
 
 func acquireTagSlot() { tagSem <- struct{}{} }
-func releaseTagSlot() { select { case <-tagSem: default: } }
+func releaseTagSlot() {
+	select {
+	case <-tagSem:
+	default:
+	}
+}
 
 // runCmdTimeout runs an external command with a timeout and returns its error
 func runCmdTimeout(timeout time.Duration, name string, args ...string) error {
@@ -1155,13 +1160,13 @@ func convertIfNeeded(track *task.Track) {
 }
 
 func ripTrack(track *task.Track, token string, mediaUserToken string) {
-    var err error
-    atomic.AddInt32(&activeDownloads, 1)
-    signalProgress()
-    defer func() {
-        atomic.AddInt32(&activeDownloads, -1)
-        signalProgress()
-    }()
+	var err error
+	atomic.AddInt32(&activeDownloads, 1)
+	signalProgress()
+	defer func() {
+		atomic.AddInt32(&activeDownloads, -1)
+		signalProgress()
+	}()
 	incTotal()
 	fmt.Printf("Track %d of %d: %s\n", track.TaskNum, track.TaskTotal, track.Type)
 
@@ -1344,52 +1349,52 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		}
 	}
 
-    if needDlAacLc {
-        acquireDownloadSlot()
-        defer releaseDownloadSlot()
-        if len(mediaUserToken) <= 50 {
-            fmt.Println("Invalid media-user-token:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
-            incError()
-            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: invalid media-user-token", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
-            return
-        }
-        _, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
-        if err != nil {
-            fmt.Println("Failed to dl aac-lc:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
-            if err.Error() == "Unavailable" {
-                incUnavailable()
-                addWarning("AAC-LC unavailable")
-                return
-            }
-            incError()
-            addFail(track.PreID, track.TaskNum)
-            addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
-            return
-        }
-    } else {
-        acquireDownloadSlot()
-        defer releaseDownloadSlot()
-        trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
-        if err != nil {
-            fmt.Println("\u26A0 Failed to extract info from manifest:", err)
-            incUnavailable()
-            addFail(track.PreID, track.TaskNum)
-            addWarning(fmt.Sprintf("Manifest extract failed: %v", err))
-            return
-        }
-        //边下载边解密
-        err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
-        if err != nil {
-            fmt.Println("Failed to run v2:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
-            incError()
-            addFail(track.PreID, track.TaskNum)
-            addError(fmt.Sprintf("[%s - %s] HLS run failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
-            return
-        }
-    }
+	if needDlAacLc {
+		acquireDownloadSlot()
+		defer releaseDownloadSlot()
+		if len(mediaUserToken) <= 50 {
+			fmt.Println("Invalid media-user-token:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+			incError()
+			addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: invalid media-user-token", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name))
+			return
+		}
+		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
+		if err != nil {
+			fmt.Println("Failed to dl aac-lc:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+			if err.Error() == "Unavailable" {
+				incUnavailable()
+				addWarning("AAC-LC unavailable")
+				return
+			}
+			incError()
+			addFail(track.PreID, track.TaskNum)
+			addError(fmt.Sprintf("[%s - %s] AAC-LC download failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+			return
+		}
+	} else {
+		acquireDownloadSlot()
+		defer releaseDownloadSlot()
+		trackM3u8Url, _, _, err := extractMedia(track.M3u8, false)
+		if err != nil {
+			fmt.Println("\u26A0 Failed to extract info from manifest:", err)
+			incUnavailable()
+			addFail(track.PreID, track.TaskNum)
+			addWarning(fmt.Sprintf("Manifest extract failed: %v", err))
+			return
+		}
+		//边下载边解密
+		err = runv2.Run(track.ID, trackM3u8Url, trackPath, Config)
+		if err != nil {
+			fmt.Println("Failed to run v2:", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+			incError()
+			addFail(track.PreID, track.TaskNum)
+			addError(fmt.Sprintf("[%s - %s] HLS run failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+			return
+		}
+	}
 	tags := []string{
 		"tool=",
-		fmt.Sprintf("artist=%s", track.Resp.Attributes.ArtistName),
+		"artist=AppleMusic",
 	}
 	if Config.EmbedCover {
 		if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
@@ -1402,16 +1407,16 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		tags = append(tags, fmt.Sprintf("cover=%s", track.CoverPath))
 	}
 	tagsString := strings.Join(tags, ":")
-    acquireTagSlot()
-    if err := runCmdTimeout(2*time.Minute, "MP4Box", "-itags", tagsString, trackPath); err != nil {
-        fmt.Printf("Embed failed %s: %v\n", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
-        incError()
-        addFail(track.PreID, track.TaskNum)
-        addError(fmt.Sprintf("[%s - %s] Tag embed failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
-        releaseTagSlot()
-        return
-    }
-    releaseTagSlot()
+	acquireTagSlot()
+	if err := runCmdTimeout(2*time.Minute, "MP4Box", "-itags", tagsString, trackPath); err != nil {
+		fmt.Printf("Embed failed %s: %v\n", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), err)
+		incError()
+		addFail(track.PreID, track.TaskNum)
+		addError(fmt.Sprintf("[%s - %s] Tag embed failed: %v", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name, err))
+		releaseTagSlot()
+		return
+	}
+	releaseTagSlot()
 	if (strings.Contains(track.PreID, "pl.") || strings.Contains(track.PreID, "ra.")) && Config.DlAlbumcoverForPlaylist {
 		if err := os.Remove(track.CoverPath); err != nil {
 			fmt.Printf("Error deleting file %s: %s\n", fmt.Sprintf("[%s - %s]", track.Resp.Attributes.ArtistName, track.Resp.Attributes.Name), track.CoverPath)
@@ -1568,7 +1573,7 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 		}
 		trackM3U8 := strings.ReplaceAll(assetsUrl, "index.m3u8", "256/prog_index.m3u8")
 		keyAndUrls, _ := runv3.Run(station.ID, trackM3U8, token, mediaUserToken, true, serverUrl)
-        err = runv3.ExtMvData(keyAndUrls, trackPath, Config.MVSegmentConcurrency)
+		err = runv3.ExtMvData(keyAndUrls, trackPath, Config.MVSegmentConcurrency)
 		if err != nil {
 			fmt.Println("Failed to download station stream.", err)
 			incError()
@@ -1638,13 +1643,13 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 	if len(toProcess) == 0 {
 		return nil
 	}
-    var wg sync.WaitGroup
-    workerCount := DownloadConcurrency
-    if workerCount > len(toProcess) {
-        workerCount = len(toProcess)
-    }
-    jobs := make(chan dlJob, workerCount)
-    wg.Add(workerCount)
+	var wg sync.WaitGroup
+	workerCount := DownloadConcurrency
+	if workerCount > len(toProcess) {
+		workerCount = len(toProcess)
+	}
+	jobs := make(chan dlJob, workerCount)
+	wg.Add(workerCount)
 	for w := 0; w < workerCount; w++ {
 		go func() {
 			defer wg.Done()
@@ -1887,8 +1892,8 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	}
 	album.SaveName = albumFolderName
 	fmt.Println(albumFolderName)
-	if Config.SaveArtistCover {
-		if len(meta.Data[0].Relationships.Artists.Data) > 0 {
+	if Config.SaveArtistCover && len(meta.Data[0].Relationships.Artists.Data) > 0 {
+		if meta.Data[0].Relationships.Artists.Data[0].Attributes.Artwork.Url != "" {
 			_, err = writeCover(singerFolder, "folder", meta.Data[0].Relationships.Artists.Data[0].Attributes.Artwork.Url)
 			if err != nil {
 				fmt.Println("Failed to write artist cover.")
@@ -2003,13 +2008,13 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	if len(toProcess) == 0 {
 		return nil
 	}
-    var wg sync.WaitGroup
-    workerCount := DownloadConcurrency
-    if workerCount > len(toProcess) {
-        workerCount = len(toProcess)
-    }
-    jobs := make(chan dlJob, workerCount)
-    wg.Add(workerCount)
+	var wg sync.WaitGroup
+	workerCount := DownloadConcurrency
+	if workerCount > len(toProcess) {
+		workerCount = len(toProcess)
+	}
+	jobs := make(chan dlJob, workerCount)
+	wg.Add(workerCount)
 	for w := 0; w < workerCount; w++ {
 		go func() {
 			defer wg.Done()
@@ -2342,7 +2347,7 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	if workerCount > len(toProcess) {
 		workerCount = len(toProcess)
 	}
-    jobs := make(chan dlJob, workerCount)
+	jobs := make(chan dlJob, workerCount)
 	var wg sync.WaitGroup
 	wg.Add(workerCount)
 	for w := 0; w < workerCount; w++ {
@@ -2407,10 +2412,12 @@ func mvDownloader(adamID string, saveDir string, token string, storefront string
 	}
 	videom3u8url, _ := extractVideo(mvm3u8url)
 	videokeyAndUrls, _ := runv3.Run(adamID, videom3u8url, token, mediaUserToken, true, "")
-    _ = runv3.ExtMvData(videokeyAndUrls, vidPath, Config.MVSegmentConcurrency)
+	_ = runv3.ExtMvData(videokeyAndUrls, vidPath, Config.MVSegmentConcurrency)
+	defer os.Remove(vidPath)
 	audiom3u8url, _ := extractMvAudio(mvm3u8url)
 	audiokeyAndUrls, _ := runv3.Run(adamID, audiom3u8url, token, mediaUserToken, true, "")
-    _ = runv3.ExtMvData(audiokeyAndUrls, audPath, Config.MVSegmentConcurrency)
+	_ = runv3.ExtMvData(audiokeyAndUrls, audPath, Config.MVSegmentConcurrency)
+	defer os.Remove(audPath)
 
 	tags := []string{
 		"tool=",
@@ -2475,22 +2482,19 @@ func mvDownloader(adamID string, saveDir string, token string, storefront string
 			tags = append(tags, fmt.Sprintf("cover=%s", covPath))
 		}
 	}
+	defer os.Remove(covPath)
 
 	tagsString := strings.Join(tags, ":")
 	muxCmdArgs := []string{"-itags", tagsString, "-quiet", "-add", vidPath, "-add", audPath, "-keep-utc", "-new", mvOutPath}
-    fmt.Printf("MV Remuxing...")
-    acquireTagSlot()
-    if err := runCmdTimeout(30*time.Minute, "MP4Box", muxCmdArgs...); err != nil {
-        fmt.Printf("MV mux failed: %v\n", err)
-        releaseTagSlot()
-        return err
-    }
-    releaseTagSlot()
+	fmt.Printf("MV Remuxing...")
+	acquireTagSlot()
+	if err := runCmdTimeout(30*time.Minute, "MP4Box", muxCmdArgs...); err != nil {
+		fmt.Printf("MV mux failed: %v\n", err)
+		releaseTagSlot()
+		return err
+	}
+	releaseTagSlot()
 	fmt.Printf("\\rMV Remuxed.   \n")
-	defer os.Remove(vidPath)
-	defer os.Remove(audPath)
-	defer os.Remove(covPath)
-
 	return nil
 }
 
@@ -2510,12 +2514,12 @@ func extractMvAudio(c string) (string, error) {
 		return "", errors.New(resp.Status)
 	}
 
-    var buf bytes.Buffer
-    _, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
-    if err != nil {
-        return "", err
-    }
-    from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
 	if err != nil || listType != m3u8.MASTER {
 		return "", errors.New("m3u8 not of media type")
 	}
@@ -2631,12 +2635,12 @@ func extractMedia(b string, more_mode bool) (string, string, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", "", "", errors.New(resp.Status)
 	}
-    var buf bytes.Buffer
-    _, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
-    if err != nil {
-        return "", "", "", err
-    }
-    from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", "", "", err
+	}
+	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
 	if err != nil || listType != m3u8.MASTER {
 		return "", "", "", errors.New("m3u8 not of master type")
 	}
@@ -2773,12 +2777,12 @@ func extractVideo(c string) (string, error) {
 		return "", errors.New(resp.Status)
 	}
 
-    var buf bytes.Buffer
-    _, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
-    if err != nil {
-        return "", err
-    }
-    from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(buf.Bytes()), true)
 	if err != nil || listType != m3u8.MASTER {
 		return "", errors.New("m3u8 not of media type")
 	}

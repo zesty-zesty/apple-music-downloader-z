@@ -44,6 +44,6 @@ require (
 	github.com/manifoldco/promptui v0.9.0
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/spf13/cobra v1.8.1
-	github.com/zhaarey/go-mp4tag v0.0.0-20250210094042-22578afc09bf
+	github.com/zhaarey/go-mp4tag v0.0.0-20251021234435-2c70f6b1bf76
 	gopkg.in/yaml.v2 v2.2.8
 )
